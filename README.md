@@ -1,52 +1,148 @@
-# android_joycon1 — Joy-Con 安卓系统级合成(KernelSU)
+# joycond-android — Nintendo Joy-Con as a single gamepad on Android, with HD Rumble
 
-目标:让所有原生安卓游戏把两只 Joy-Con 认成一只完整手柄。
-路线:GKI 内核自带 `hid-nintendo`(实测 `=y`)+ joycond 守护进程 + KernelSU 模块。
-Pre-check 全绿记录见 `precheck/RESULTS.md`,背景分析见 `temp.md`。
+[中文文档 (Chinese README)](README.zh-CN.md)
 
-## 构建(声明式,全部 pin 在 flake.lock)
+Root-only solution that makes **all native Android games and emulators** see a pair of
+Nintendo Joy-Cons as **one complete controller** (`Nintendo Switch Combined Joy-Cons`,
+vendor `0x057e` product `0x2008`), plus **rumble / HD-Rumble-style vibration** on
+kernels where the kernel FF path is unavailable.
 
-```bash
-nix build              # → ./result 是 KernelSU 模块 zip
-nix build .#joycond-android   # 只要二进制
+Developed and verified on **Pixel 6 (oriole), Android 16, GKI kernel
+6.1.145-android14**, root via **KernelSU Next**. Everything is built declaratively with
+Nix flakes; `nix build` produces an installable KernelSU module zip.
+
+## How it works
+
+```
+BT HID (uhid)                    /dev/input                /dev/hidraw
+┌──────────────┐   kernel hid-nintendo (=y in GKI)   ┌─────────────────────┐
+│ Joy-Con (L)  ├───────────────────────────────────► │ evdev event4 (L)    │──┐
+│ Joy-Con (R)  ├───────────────────────────────────► │ evdev event6 (R)    │  │
+└──────────────┘      calibration, IMU, battery       └─────────────────────┘  │
+                                                               ▲  ▼             │
+                                        EVIOCGRAB + FF hook    │  │             │
+                                                       ┌───────┴──┴─────────┐   │
+                                                       │      joycond       │   │
+                                                       │ (patched, see      │   │
+                                                       │  rumble_hidraw)    │   │
+                                                       └───────┬────────────┘   │
+                                     uinput: combined 0x2008   │                │
+                                     with standard gamepad     ▼                │
+                                     axes (X/Y/Z/RZ/HAT…)  /system/usr/{keylayout,idc}
+                                     ◄─── magic self-mount │ (bind mount by     │
+                                                           │  service.sh)       │
+                          FF upload/play ──────────────────┤                    │
+                                                           ▼                    │
+                                               rumble_hidraw: BT OUTPUT 0x10 ───┘
+                                               (60Hz capable, HF+LF bands,
+                                                bypasses CONFIG_NINTENDO_FF=n)
 ```
 
-组成:
-- `nix/joycond-android.nix` — NDK r29 交叉编译 libevdev(静态)+ joycond,
-  产物只依赖 bionic + liblog;`__ANDROID__` 由 clang android target 自动定义,
-  启用上游 netlink 检测器(排除 udev,无需 libudev)
-- `nix/module.nix` — 组装 KernelSU 模块 zip
-- `module/` — module.prop / service.sh(守护+日志)/ sepolicy.rule(保险)/
-  LineageOS 版 0x2008 keylayout + 上游 idc(单只 device.disabled,合成 device.internal=0)
+Three layers had to cooperate (and three separate pitfalls were hit — see
+[TROUBLESHOOTING](docs/TROUBLESHOOTING.md)):
 
-## 安装
+1. **Kernel**: modern GKI kernels ship `CONFIG_HID_NINTENDO=y` (built-in), so Joy-Cons
+   bind to the `nintendo` HID driver with factory/user calibration. No kernel rebuild
+   needed. However `CONFIG_NINTENDO_FF` (the force-feedback sub-option) is **not** set
+   in GKI — the kernel exposes the FF interface but never sends rumble to the pads.
+2. **Userspace**: upstream [joycond](https://github.com/DanielOgorchock/joycond) grabs
+   both physical devices, merges them and creates the combined uinput device. It
+   already has an Android detector (netlink uevent, no udev). This project patches it
+   to also **drive rumble directly via hidraw** (`0x10` reports, HF+LF bands,
+   60Hz streaming — full HD-Rumble capability), bypassing the dead kernel FF path.
+3. **Framework**: a keylayout (`Vendor_057e_Product_2008.kl`, LineageOS version with
+   HAT axes + analog triggers) and idc files are bind-mounted into
+   `/system/usr/{keylayout,idc}` by the module's `service.sh` (KernelSU Next ≥ 3.3
+   has no magic mount without the optional metamodule; `/data` is not executable, so
+   the daemon is staged into `/dev` tmpfs instead; SELinux labels are fixed with
+   `chcon u:object_r:system_file:s0`).
 
-1. `result` 拷到手机:`adb push $(readlink -f result) /sdcard/Download/joycond.zip`
-2. KernelSU App → 模块 → 从本地存储安装 → 选 zip → **重启**
-3. 重启后两只 Joy-Con 各自配对连接(设置→蓝牙,按手柄侧边小圆钮)
+## What works / what doesn't
 
-## 验证
+| Capability | Status |
+|---|---|
+| Combined single gamepad for **all** apps (system-wide) | ✅ |
+| Sticks (full range, calibrated), ABXY, D-pad→HAT, L/R, ZL/ZR→analog triggers, SL/SR, +/-, Home, Capture | ✅ |
+| Individual Joy-Cons hidden from apps (`device.disabled=1` idc) | ✅ |
+| Rumble (classic dual-motor semantics: strong→LF band, weak→HF band) | ✅ via hidraw |
+| **HD-Rumble-style streaming waveforms** (60Hz, per-band amplitude/frequency control) | ✅ via hidraw (`hd-test`) |
+| Sleep / auto-reconnect (~5 min idle), MAC-based rebinding | ✅ handled by joycond |
+| Battery level | ✅ kernel (`capacity_level`), no framework UI |
+| IMU (motion) | ❌ kernel data exists; joycond drops it; Android framework has no path (see temp.md analysis) |
+| NFC / Amiibo, IR camera | ❌ structurally impossible on stock Android |
+
+## Build
+
+Requirements: Nix with flakes enabled. Everything else (NDK r29, libevdev, cross
+toolchain) is pinned by `flake.lock`.
 
 ```bash
-adb shell su -c 'ls -l /vendor/bin/joycond'          # magic mount 成功?
-adb shell su -c 'tail /data/adb/joycond.log'          # 守护进程日志
-adb shell su -c 'getevent -pl | grep -A2 Combined'    # 应见 Nintendo Switch Combined Joy-Cons
+nix build                    # KernelSU module zip → ./result
+nix build .#joycond-android  # just the daemon binary
+nix build .#ff-test-android  # evdev FF test tool
+nix build .#hd-test-android  # HD rumble waveform demo player
 ```
 
-预期:合成设备 `Vendor 0x57e Product 0x2008` 出现,含双摇杆+HAT+ABXY+模拟扳机;
-单只 2006/2007 被 idc 禁用,游戏不再看到半截手柄。
+Artifacts of the Android build depend only on `libc.so`, `liblog.so`, `libdl.so`,
+`libm.so` (static libc++; API 28).
 
-## 已知约束(pre-check 实测)
-
-- 手柄 ~5 分钟休眠,重连后 event 节点号变化 — joycond 的 MAC 去重逻辑已处理
-- 蓝牙带宽紧张(dmesg 有 dropped IMU reports),后续 HD Rumble 直通需限速
-- kl 为任天堂原生布局(按名字映射);想要 Xbox 布局(A/B、X/Y 交换)改
-  `module/keylayout/` 里对应行重新 build 即可
-- 体感(IMU)与 NFC/红外仍不可用(框架结构性限制,见 temp.md)
-
-## 开发
+## Install
 
 ```bash
-nix develop        # 含 nixfmt-rfc-style / adb / zip
-nix fmt
+adb push -a "$(readlink -f result)" /sdcard/Download/joycond.zip
 ```
+
+Then: **KernelSU app → Modules → Install from storage → joycond.zip → reboot**.
+Pair both Joy-Cons in Android Bluetooth settings (hold the sync button on the rail).
+When both are connected they are combined automatically (no L+R needed — the Android
+build of joycond puts single controllers in `Waiting` state and merges on arrival).
+
+## Verify
+
+```bash
+adb shell su -c 'tail /data/adb/joycond.log'                      # daemon log
+adb shell su -c 'getevent -il | grep -A2 Combined'                # combined device
+adb shell 'dumpsys input | grep -A8 Combined'                     # framework view
+```
+
+The framework should report `Sources: KEYBOARD | GAMEPAD | JOYSTICK`, `ControllerNum: 1`
+and standard axes (`AXIS_X/Y/Z/RZ/HAT_X/HAT_Y`). Any game with controller support —
+or a gamepad tester app — should now work.
+
+HD rumble demo (both pads vibrate in sync; 5 looping waveform sketches):
+
+```bash
+adb push hd-test → /data/local/tmp/   # see nix/hd-test.nix
+adb shell su -c '/data/local/tmp/hd-test /dev/hidraw0 /dev/hidraw1'
+```
+
+## Repository layout
+
+```
+├── flake.nix               # entry point; dedicated allowUnfree instance for the NDK
+├── nix/
+│   ├── joycond-android.nix # NDK r29 cross build; libevdev static; bionic compat patches
+│   ├── joycond-hidraw-rumble.patch  # hidraw rumble passthrough for joycond
+│   ├── module.nix          # KernelSU module assembly (zip)
+│   ├── ff-test.nix         # evdev FF tester (aarch64-android)
+│   └── hd-test.nix         # HD rumble waveform player
+├── module/                 # module.prop, service.sh (self-mounting), sepolicy.rule,
+│   ├── keylayout/          #   Vendor_057e_Product_2008.kl (LineageOS 2025)
+│   └── idc/                #   2006/2007 disabled, 2008 external
+├── ff-test/, hd-test/      # test tool sources
+├── refs/                   # upstream clones (gitignored): joycond, LineageOS HAL, dekuNukem docs
+├── precheck/               # pre-flight check scripts + results (see RESULTS.md)
+└── temp.md                 # original feasibility study (Chinese)
+```
+
+## License
+
+- joycond: GPLv3 (upstream), this repository's build system and patches: GPLv3-or-later
+- joycond LineageOS keylayout file: Apache-2.0 (LineageOS)
+
+## Acknowledgements
+
+- [DanielOgorchock/joycond](https://github.com/DanielOgorchock/joycond) — the daemon
+- [LineageOS android_hardware_nintendo_joycond](https://github.com/LineageOS/android_hardware_nintendo_joycond) — keylayout, sepolicy reference
+- [dekuNukem/Nintendo_Switch_Reverse_Engineering](https://github.com/dekuNukem/Nintendo_Switch_Reverse_Engineering) — rumble protocol
+- [ricky-thomson/joycond](https://github.com/DanielOgorchock/joycond/pulls) and everyone in the joycond issue tracker who documented the Android quirks

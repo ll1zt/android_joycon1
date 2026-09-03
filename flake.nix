@@ -31,6 +31,9 @@
     in
     {
       packages.${system} = {
+        hd-test-android = pkgs.callPackage ./nix/hd-test.nix {
+          ndk-bundle = pkgsAndroid.androidenv.androidPkgs.ndk-bundle;
+        };
         ff-test-android = pkgs.callPackage ./nix/ff-test.nix {
           ndk-bundle = pkgsAndroid.androidenv.androidPkgs.ndk-bundle;
         };

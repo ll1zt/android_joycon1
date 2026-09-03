@@ -1,0 +1,309 @@
+diff --git a/include/phys_ctlr.h b/include/phys_ctlr.h
+index b480d59..bc39250 100644
+--- a/include/phys_ctlr.h
++++ b/include/phys_ctlr.h
+@@ -2,6 +2,7 @@
+ #define JOYCOND_PHYS_CTLR_H
+ 
+ #include <fstream>
++#include "rumble_hidraw.h"
+ #include <libevdev/libevdev.h>
+ #include <optional>
+ #include <string>
+@@ -23,6 +24,7 @@ class phys_ctlr
+         bool l, zl, r, zr, sl, sr, plus, minus;
+         enum Model model;
+         std::string mac_addr;
++        rumble_hidraw rumble;
+ 
+         std::optional<std::string> get_first_glob_path(std::string const &pattern);
+         std::optional<std::string> get_led_path(std::string const &name);
+@@ -49,6 +51,7 @@ class phys_ctlr
+         void zero_triggers();
+         const std::string& get_mac_addr() { return mac_addr; }
+         bool is_serial_ctlr() const { return is_serial; }
++        rumble_hidraw& get_rumble() { return rumble; }
+ };
+ 
+ #endif
+diff --git a/include/rumble_hidraw.h b/include/rumble_hidraw.h
+new file mode 100644
+index 0000000..fa92629
+--- /dev/null
++++ b/include/rumble_hidraw.h
+@@ -0,0 +1,45 @@
++#ifndef JOYCOND_RUMBLE_HIDRAW_H
++#define JOYCOND_RUMBLE_HIDRAW_H
++
++#include <string>
++
++/*
++ * hidraw 直通震动发送器。
++ *
++ * 背景:GKI 内核的 hid-nintendo 编译时 CONFIG_NINTENDO_FF 未开启,
++ * 内核 FF 框架的 effect 永远不会被转成 0x10 震动报告发给手柄。
++ * 本模块绕过内核 FF,直接经 hidraw 写 BT OUTPUT 0x10 报告。
++ *
++ * 协议(dekuNukem/Nintendo_Switch_Reverse_Engineering):
++ *   OUTPUT 0x10: [0x10][pkt_num 0x0-0xF][左 JC 4字节][右 JC 4字节] 共 64 字节
++ *   每只手柄 4 字节 = [HF freq][HF amp][LF freq][LF amp]
++ *   LF 幅度安全上限 0x72;中性(关震) = 00 01 40 40
++ */
++class rumble_hidraw
++{
++    private:
++        int fd;
++        unsigned char pkt_num;
++        unsigned long last_send_ms;
++        bool is_left;
++
++        int find_hidraw_fd(const std::string &devpath);
++        void encode_band(unsigned char *out, unsigned char hf_freq,
++                         unsigned char hf_amp, unsigned char lf_freq,
++                         unsigned char lf_amp);
++        int write_report(const unsigned char self[4], bool is_left);
++
++    public:
++        rumble_hidraw();
++        ~rumble_hidraw();
++        /* devpath 形如 /class/input/eventX;返回是否成功打开 hidraw */
++        bool open_for(const std::string &devpath, bool is_left);
++        bool is_open() const { return fd >= 0; }
++        /* strong/weak: FF_RUMBLE 的 0..0xFFFF 幅度,映射到 LF/HF 频段 */
++        void send(unsigned short strong, unsigned short weak);
++        /* 发中性值停震 */
++        void stop();
++        void close();
++};
++
++#endif
+diff --git a/include/virt_ctlr_combined.h b/include/virt_ctlr_combined.h
+index f8c85a3..983fdf6 100644
+--- a/include/virt_ctlr_combined.h
++++ b/include/virt_ctlr_combined.h
+@@ -20,6 +20,7 @@ class virt_ctlr_combined : public virt_ctlr
+         struct libevdev_uinput *uidev;
+         int uifd;
+         std::map<int, std::pair<struct ff_effect, struct ff_effect>> rumble_effects;
++        std::map<int, std::pair<unsigned short, unsigned short>> rumble_magnitudes; // 合成id -> (strong,weak)
+         std::string left_mac;
+         std::string right_mac;
+ 
+diff --git a/src/ctlr_detector_android.cpp b/src/ctlr_detector_android.cpp
+index 6997557..f89dcc9 100644
+--- a/src/ctlr_detector_android.cpp
++++ b/src/ctlr_detector_android.cpp
+@@ -10,9 +10,9 @@
+ #include <fcntl.h>
+ #include <unistd.h>
+ #include <dirent.h>
++#include <libgen.h>
+ #include <linux/types.h>
+ #include <linux/netlink.h>
+-#include <netlink/msg.h>
+ #include <libevdev/libevdev.h>
+ 
+ //private
+diff --git a/src/phys_ctlr.cpp b/src/phys_ctlr.cpp
+index 8d0e4a8..e4bd180 100644
+--- a/src/phys_ctlr.cpp
++++ b/src/phys_ctlr.cpp
+@@ -306,6 +306,14 @@ phys_ctlr::phys_ctlr(std::string const &devpath, std::string const &devname) :
+ #endif
+     std::getline(funiq, mac_addr);
+     std::cout << "MAC: " << mac_addr << std::endl;
++
++    // 打开 hidraw 直通震动通道(CONFIG_NINTENDO_FF 缺失的替代路径)
++    {
++        enum Model m = get_model();
++        bool left = (m == Model::Left_Joycon || m == Model::Procon);
++        if (rumble.open_for(devpath, left))
++            std::cout << "rumble hidraw opened for " << devpath << " left=" << left << std::endl;
++    }
+ }
+ 
+ phys_ctlr::~phys_ctlr()
+diff --git a/src/rumble_hidraw.cpp b/src/rumble_hidraw.cpp
+new file mode 100644
+index 0000000..e8bb3c1
+--- /dev/null
++++ b/src/rumble_hidraw.cpp
+@@ -0,0 +1,131 @@
++#include "rumble_hidraw.h"
++
++#include <glob.h>
++#include <string.h>
++#include <fcntl.h>
++#include <unistd.h>
++#include <time.h>
++#include <iostream>
++
++// HF 频段选点:freq byte 0x04 起步(81.75Hz),步进 +0x04;0x20 ≈ 160Hz 附近
++#define HF_FREQ_DEFAULT 0x20
++// LF 频段选点:0x01(40.87Hz) - 0x7F(626Hz);普通震动的厚实感取 ~80Hz
++#define LF_FREQ_DEFAULT 0x14
++// LF 幅度编码:0x40 = 0.0f,0x72 = 1.0f(安全上限,文档明确警告超限伤 LRA)
++#define LF_AMP_OFF   0x40
++#define LF_AMP_MAX   0x72
++// HF 幅度编码:0x01 ≈ 0.0f,0xC8 = 1.0f
++#define HF_AMP_OFF   0x01
++#define HF_AMP_MAX   0xC8
++
++static const unsigned char NEUTRAL[4] = { 0x00, 0x01, 0x40, 0x40 };
++// 同参数最小重发间隔(ms),防止 play 风暴打爆蓝牙链路(0x30 报告仍在 60Hz 抢带宽)
++#define MIN_INTERVAL_MS 10
++
++static unsigned long now_ms()
++{
++    struct timespec ts;
++    clock_gettime(CLOCK_MONOTONIC, &ts);
++    return ts.tv_sec * 1000UL + ts.tv_nsec / 1000000UL;
++}
++
++rumble_hidraw::rumble_hidraw() : fd(-1), pkt_num(0), last_send_ms(0), is_left(false)
++{
++}
++
++rumble_hidraw::~rumble_hidraw()
++{
++    close();
++}
++
++int rumble_hidraw::find_hidraw_fd(const std::string &devpath)
++{
++    // devpath = /class/input/eventX ; hidraw 是其 HID 父设备的兄弟节点
++    std::string glob_pat = "/sys" + devpath + "/device/hidraw/hidraw*";
++    glob_t gl;
++    memset(&gl, 0, sizeof(gl));
++    if (glob(glob_pat.c_str(), 0, NULL, &gl) != 0 || gl.gl_pathc == 0) {
++        globfree(&gl);
++        return -1;
++    }
++    std::string name = gl.gl_pathv[0];
++    globfree(&gl);
++    size_t slash = name.find_last_of('/');
++    if (slash == std::string::npos)
++        return -1;
++    return open(("/dev/" + name.substr(slash + 1)).c_str(), O_WRONLY | O_NONBLOCK);
++}
++
++bool rumble_hidraw::open_for(const std::string &devpath, bool left)
++{
++    is_left = left;
++    close();
++    fd = find_hidraw_fd(devpath);
++    if (fd < 0)
++        std::cerr << "rumble_hidraw: no hidraw for " << devpath << std::endl;
++    return fd >= 0;
++}
++
++void rumble_hidraw::close()
++{
++    if (fd >= 0) {
++        ::close(fd);
++        fd = -1;
++    }
++}
++
++void rumble_hidraw::encode_band(unsigned char *out, unsigned char hf_freq,
++                                unsigned char hf_amp, unsigned char lf_freq,
++                                unsigned char lf_amp)
++{
++    out[0] = hf_freq;  // HF 频率
++    out[1] = hf_amp;   // HF 幅度
++    out[2] = lf_freq;  // LF 频率
++    out[3] = lf_amp;   // LF 幅度
++}
++
++int rumble_hidraw::write_report(const unsigned char self[4], bool is_left)
++{
++    unsigned char buf[0x40];
++    memset(buf, 0, sizeof(buf));
++    buf[0] = 0x10;                    // rumble-only 输出报告
++    buf[1] = pkt_num++;               // 包序号循环 0x0-0xF
++    pkt_num &= 0x0F;
++
++    if (is_left) {
++        memcpy(buf + 2, self, 4);     // 左手柄数据在前 4 字节
++        memcpy(buf + 6, NEUTRAL, 4);
++    } else {
++        memcpy(buf + 2, NEUTRAL, 4);
++        memcpy(buf + 6, self, 4);     // 右手柄数据在后 4 字节
++    }
++
++    return write(fd, buf, sizeof(buf));
++}
++
++void rumble_hidraw::send(unsigned short strong, unsigned short weak)
++{
++    if (fd < 0)
++        return;
++
++    unsigned long now = now_ms();
++    if (now - last_send_ms < MIN_INTERVAL_MS)
++        return;
++    last_send_ms = now;
++
++    unsigned char band[4];
++    // FF_RUMBLE: strong_magnitude = LF 马达语义, weak = HF;映射到双频带幅度
++    encode_band(band,
++                HF_FREQ_DEFAULT,
++                HF_AMP_OFF + (unsigned)weak * (HF_AMP_MAX - HF_AMP_OFF) / 0xFFFF,
++                LF_FREQ_DEFAULT,
++                LF_AMP_OFF + (unsigned)strong * (LF_AMP_MAX - LF_AMP_OFF) / 0xFFFF);
++    write_report(band, is_left);
++}
++
++void rumble_hidraw::stop()
++{
++    if (fd < 0)
++        return;
++    write_report(NEUTRAL, is_left);
++}
+diff --git a/src/virt_ctlr_combined.cpp b/src/virt_ctlr_combined.cpp
+index ce5ea9a..68e3f5f 100644
+--- a/src/virt_ctlr_combined.cpp
++++ b/src/virt_ctlr_combined.cpp
+@@ -1,4 +1,5 @@
+ #include "virt_ctlr_combined.h"
++#include <map>
+ 
+ #include <cstring>
+ #include <fcntl.h>
+@@ -111,6 +112,23 @@ void virt_ctlr_combined::handle_uinput_event()
+                         if (write(physr->get_fd(), &redirectedr, sizeof(redirectedr)) != sizeof(redirectedr))
+                             std::cerr << "Failed to forward EV_FF to physr\n";
+                     }
++
++                    // hidraw 直通(CONFIG_NINTENDO_FF 关闭时内核不下发,由本进程直接写 0x10)
++                    if (ev.value == 1) {
++                        auto mag = std::make_pair((unsigned short)0xC000, (unsigned short)0xC000);
++                        auto it = rumble_magnitudes.find(ev.code);
++                        if (it != rumble_magnitudes.end())
++                            mag = it->second;
++                        if (physl && physl->get_rumble().is_open())
++                            physl->get_rumble().send(mag.first, mag.second);
++                        if (physr && physr->get_rumble().is_open())
++                            physr->get_rumble().send(mag.first, mag.second);
++                    } else {
++                        if (physl && physl->get_rumble().is_open())
++                            physl->get_rumble().stop();
++                        if (physr && physr->get_rumble().is_open())
++                            physr->get_rumble().stop();
++                    }
+                     break;
+                 }
+ 
+@@ -129,6 +147,12 @@ void virt_ctlr_combined::handle_uinput_event()
+                                 std::cerr << "Failed to get uinput_ff_upload: " << strerror(errno) << std::endl;
+ 
+                             effect = upload.effect;
++                            // hidraw 直通:记住合成设备 id 上的幅度(FF 播放事件只有 id)
++                            if (effect.type == FF_RUMBLE)
++                                rumble_magnitudes[upload.effect.id] = std::make_pair(
++                                    effect.u.rumble.strong_magnitude,
++                                    effect.u.rumble.weak_magnitude);
++                            effect = upload.effect;
+                             /* Check if already allocated or it needs an update */
+                             allocate_new_effect = !rumble_effects.count(effect.id);
+                             if (allocate_new_effect)

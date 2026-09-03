@@ -86,6 +86,7 @@ let
     "src/virt_ctlr_combined.cpp"
     "src/virt_ctlr_passthrough.cpp"
     "src/virt_ctlr_pro.cpp"
+    "src/rumble_hidraw.cpp"
   ];
 in
 stdenvNoCC.mkDerivation (finalAttrs: {
@@ -106,6 +107,12 @@ stdenvNoCC.mkDerivation (finalAttrs: {
     sed -i '/#include <netlink\/msg.h>/d' src/ctlr_detector_android.cpp
     sed -i 's|#include <linux/types.h>|#include <libgen.h>\n#include <linux/types.h>|' src/ctlr_detector_android.cpp
   '';
+
+  patches = [
+    # hidraw 直通震动:GKI 的 hid-nintendo 未开 CONFIG_NINTENDO_FF,
+    # 内核 FF 链路废;在 joycond 内截 FF upload/play,直接写 0x10 报告
+    ./joycond-hidraw-rumble.patch
+  ];
 
   # clang 的 android target 自动定义 __ANDROID__,触发 android 检测器分支
   buildPhase = ''

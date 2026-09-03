@@ -31,6 +31,9 @@
     in
     {
       packages.${system} = {
+        ff-test-android = pkgs.callPackage ./nix/ff-test.nix {
+          ndk-bundle = pkgsAndroid.androidenv.androidPkgs.ndk-bundle;
+        };
         joycond-android = pkgs.callPackage ./nix/joycond-android.nix {
           ndk-bundle = pkgsAndroid.androidenv.androidPkgs.ndk-bundle;
         };

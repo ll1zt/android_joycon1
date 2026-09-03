@@ -2,6 +2,10 @@
 
 [English README](README.md)
 
+> **一分钟速览** — 已 root 的 GKI 内核安卓机(Android 12+，如 Pixel，KernelSU/Magisk):
+> `nix build` → 刷入 zip → 重启 → 配对两只 Joy-Con，全局合成一只手柄，游戏直接用，
+> 还带震动。已在 Pixel 6 / Android 16 验证。其他机型需要自行适配，先看[预检脚本](precheck/)。
+
 仅 root 方案:让**所有原生安卓游戏和模拟器**把一对任天堂 Joy-Con 识别成**一只完整手柄**
 (`Nintendo Switch Combined Joy-Cons`,vendor `0x057e` / product `0x2008`),并附带
 **普通震动与 HD Rumble 级别的波形震动**——即使内核 FF 路径被裁掉也能震。
@@ -35,8 +39,7 @@ BT HID (uhid)                内核 hid-nintendo(GKI 内置 =y)      /dev/input 
                                                绕过 CONFIG_NINTENDO_FF=n)
 ```
 
-三层必须协同(每一层都踩过真实的坑,完整记录见
-[TROUBLESHOOTING](docs/TROUBLESHOOTING.zh-CN.md)):
+三层必须协同(每一层都踩过真实的坑):
 
 1. **内核层**:新 GKI 内核自带 `CONFIG_HID_NINTENDO=y`(编进本体),Joy-Con 直接绑
    `nintendo` 驱动,工厂/用户校准齐全,**不用编内核**。但 GKI 没开
@@ -104,6 +107,7 @@ adb shell 'dumpsys input | grep -A8 Combined'       # 框架视角
 框架应显示 `Sources: KEYBOARD | GAMEPAD | JOYSTICK`、`ControllerNum: 1`,轴为标准
 `AXIS_X/Y/Z/RZ/HAT_X/HAT_Y`。任何支持手柄的游戏此时应直接可用。
 
+
 HD 震动演示(双手柄同步,5 段循环波形:弹珠滚动/心跳/雨滴/扫频/引擎):
 
 ```bash
@@ -124,10 +128,9 @@ adb shell su -c '/data/local/tmp/hd-test /dev/hidraw0 /dev/hidraw1'
 ├── module/                 # module.prop、service.sh(自挂载)、sepolicy.rule
 │   ├── keylayout/          #   Vendor_057e_Product_2008.kl(LineageOS 2025 版)
 │   └── idc/                #   2006/2007 禁用单只、2008 标记外接
-├── ff-test/、hd-test/      # 测试工具源码
+├── ff-test/、hd-test/      # 测试工具源码(ff-test:已死的内核 FF 路径验证;hd-test:HD 震动演示)
 ├── refs/                   # 上游克隆(gitignore):joycond、LineageOS HAL、dekuNukem 文档
-├── precheck/               # 预检脚本与结论(见 RESULTS.md)
-└── temp.md                 # 最初的可行性研究(中文)
+├── precheck/               # 预检脚本
 ```
 
 ## 许可
@@ -139,4 +142,4 @@ adb shell su -c '/data/local/tmp/hd-test /dev/hidraw0 /dev/hidraw1'
 
 - [DanielOgorchock/joycond](https://github.com/DanielOgorchock/joycond) — 守护进程本体
 - [LineageOS android_hardware_nintendo_joycond](https://github.com/LineageOS/android_hardware_nintendo_joycond) — keylayout、sepolicy 参考
-- [dekuNukem/Nintendo_Switch_Reverse_Engineering](https://github.com/dekuNukem/Nintendo_Switch_Reverse_Engineering) — 震动协议文档
+- [dekuNukem/Nintendo_Switch_Reverse_Engineering](https://github.com/dekuNukem/Nintendo_Switch_Reverse_Engineering) — Joy-Con 协议与震动数据格式文档

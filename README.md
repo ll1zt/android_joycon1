@@ -2,6 +2,11 @@
 
 [中文文档 (Chinese README)](README.zh-CN.md)
 
+> **TL;DR** — Rooted Android (KernelSU/Magisk) on a GKI kernel (Android 12+,
+> e.g. Pixel): `nix build`, flash the resulting zip, reboot, pair two Joy-Cons,
+> done — one controller with rumble in every game. Tested on Pixel 6 / Android 16.
+> Other devices: expect to adapt; see [precheck](precheck/) first.
+
 Root-only solution that makes **all native Android games and emulators** see a pair of
 Nintendo Joy-Cons as **one complete controller** (`Nintendo Switch Combined Joy-Cons`,
 vendor `0x057e` product `0x2008`), plus **rumble / HD-Rumble-style vibration** on
@@ -38,8 +43,7 @@ BT HID (uhid)                    /dev/input                /dev/hidraw
                                                 bypasses CONFIG_NINTENDO_FF=n)
 ```
 
-Three layers had to cooperate (and three separate pitfalls were hit — see
-[TROUBLESHOOTING](docs/TROUBLESHOOTING.md)):
+Three layers had to cooperate (each with real pitfalls):
 
 1. **Kernel**: modern GKI kernels ship `CONFIG_HID_NINTENDO=y` (built-in), so Joy-Cons
    bind to the `nintendo` HID driver with factory/user calibration. No kernel rebuild
@@ -68,7 +72,7 @@ Three layers had to cooperate (and three separate pitfalls were hit — see
 | **HD-Rumble-style streaming waveforms** (60Hz, per-band amplitude/frequency control) | ✅ via hidraw (`hd-test`) |
 | Sleep / auto-reconnect (~5 min idle), MAC-based rebinding | ✅ handled by joycond |
 | Battery level | ✅ kernel (`capacity_level`), no framework UI |
-| IMU (motion) | ❌ kernel data exists; joycond drops it; Android framework has no path (see temp.md analysis) |
+| IMU (motion) | ❌ kernel data exists; joycond drops it; Android framework has no path |
 | NFC / Amiibo, IR camera | ❌ structurally impossible on stock Android |
 
 ## Build
@@ -109,6 +113,7 @@ The framework should report `Sources: KEYBOARD | GAMEPAD | JOYSTICK`, `Controlle
 and standard axes (`AXIS_X/Y/Z/RZ/HAT_X/HAT_Y`). Any game with controller support —
 or a gamepad tester app — should now work.
 
+
 HD rumble demo (both pads vibrate in sync; 5 looping waveform sketches):
 
 ```bash
@@ -129,10 +134,9 @@ adb shell su -c '/data/local/tmp/hd-test /dev/hidraw0 /dev/hidraw1'
 ├── module/                 # module.prop, service.sh (self-mounting), sepolicy.rule,
 │   ├── keylayout/          #   Vendor_057e_Product_2008.kl (LineageOS 2025)
 │   └── idc/                #   2006/2007 disabled, 2008 external
-├── ff-test/, hd-test/      # test tool sources
+├── ff-test/, hd-test/      # test tool sources (ff-test: legacy kernel-FF path; hd-test: HD rumble demo)
 ├── refs/                   # upstream clones (gitignored): joycond, LineageOS HAL, dekuNukem docs
-├── precheck/               # pre-flight check scripts + results (see RESULTS.md)
-└── temp.md                 # original feasibility study (Chinese)
+├── precheck/               # pre-flight check scripts
 ```
 
 ## License
@@ -144,5 +148,4 @@ adb shell su -c '/data/local/tmp/hd-test /dev/hidraw0 /dev/hidraw1'
 
 - [DanielOgorchock/joycond](https://github.com/DanielOgorchock/joycond) — the daemon
 - [LineageOS android_hardware_nintendo_joycond](https://github.com/LineageOS/android_hardware_nintendo_joycond) — keylayout, sepolicy reference
-- [dekuNukem/Nintendo_Switch_Reverse_Engineering](https://github.com/dekuNukem/Nintendo_Switch_Reverse_Engineering) — rumble protocol
-- [ricky-thomson/joycond](https://github.com/DanielOgorchock/joycond/pulls) and everyone in the joycond issue tracker who documented the Android quirks
+- [dekuNukem/Nintendo_Switch_Reverse_Engineering](https://github.com/dekuNukem/Nintendo_Switch_Reverse_Engineering) — Joy-Con protocol & rumble data format documentation

@@ -1,0 +1,8 @@
+# joycond 所需 SELinux 规则(参照 LineageOS hardware/nintendo_joycond/sepolicy/joycond.te)
+# 注:KernelSU 的 ksu 域实测为 permissive,本文件是保险(域收紧后仍可用)
+allow ksu input_device dir { search read open getattr }
+allow ksu input_device chr_file { getattr read write ioctl setattr }
+allow ksu uhid_device chr_file { getattr read write ioctl }
+allow ksu self netlink_kobject_uevent_socket { create bind read write getopt setopt }
+allow ksu sysfs dir { search read open getattr }
+allow ksu sysfs file { read open getattr }

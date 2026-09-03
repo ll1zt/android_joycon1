@@ -126,7 +126,11 @@ stdenvNoCC.mkDerivation (finalAttrs: {
     runHook postInstall
   '';
 
-  dontStrip = false;
+  # NDK llvm-strip 交叉 strip
+  postInstall = ''
+    ${llvm}/bin/llvm-strip $out/bin/joycond
+  '';
+  dontStrip = true;
   dontFixup = true;
 
   meta = {

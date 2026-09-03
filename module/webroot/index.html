@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>joycond 控制面板</title>
+<style>
+  :root{--bg:#111418;--card:#1a1f26;--line:#2a313b;--fg:#e8eaed;--dim:#9aa4b0;
+        --acc:#7ab56d;--warn:#e0a24a;--err:#e06c5a;}
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:var(--bg);color:var(--fg);font:15px/1.5 system-ui,sans-serif;padding:12px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px;margin-bottom:12px}
+  h2{font-size:14px;color:var(--dim);text-transform:uppercase;letter-spacing:.08em;margin-bottom:10px}
+  .row{display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-bottom:1px solid var(--line)}
+  .row:last-child{border-bottom:none}
+  .ok{color:var(--acc)} .bad{color:var(--err)} .warn{color:var(--warn)}
+  button{background:#2a313b;color:var(--fg);border:1px solid var(--line);border-radius:8px;
+         padding:10px 12px;font-size:15px;margin:4px 4px 0 0;min-width:86px}
+  button:active{background:#3a4450}
+  input[type=range]{width:100%;accent-color:var(--acc)}
+  select{background:#2a313b;color:var(--fg);border:1px solid var(--line);border-radius:8px;padding:8px}
+  #log{background:#0c0e11;border:1px solid var(--line);border-radius:8px;padding:8px;
+       font:12px/1.5 monospace;white-space:pre-wrap;max-height:180px;overflow-y:auto;color:var(--dim)}
+  .muted{color:var(--dim);font-size:13px}
+  label{display:flex;justify-content:space-between;align-items:center;padding:6px 0}
+</style>
+</head>
+<body>
+
+<div class="card">
+  <h2>状态</h2>
+  <div class="row"><span>joycond 守护进程</span><span id="st-daemon">…</span></div>
+  <div class="row"><span>合成手柄</span><span id="st-combined">…</span></div>
+  <div class="row"><span>左 Joy-Con</span><span id="st-left">…</span></div>
+  <div class="row"><span>右 Joy-Con</span><span id="st-right">…</span></div>
+  <button onclick="refresh()">刷新</button>
+</div>
+
+<div class="card">
+  <h2>震动测试</h2>
+  <div class="muted" style="margin-bottom:6px">需两只手柄已连接并合成</div>
+  <button onclick="rumble(0x3000,0x3000,250)">轻震</button>
+  <button onclick="rumble(0x8000,0x8000,300)">中震</button>
+  <button onclick="rumble(0xffff,0xffff,450)">强震</button>
+  <button onclick="hdDemo()">HD 演示</button>
+  <button onclick="hdStop()">停止</button>
+</div>
+
+<div class="card">
+  <h2>设置</h2>
+  <label>震动总强度
+    <span id="scaleVal" class="muted">100%</span>
+  </label>
+  <input type="range" id="scale" min="10" max="100" step="5" value="100"
+         oninput="document.getElementById('scaleVal').textContent=this.value+'%'">
+  <button onclick="saveScale()">应用强度</button>
+  <div style="height:8px"></div>
+  <label>ABXY 布局
+    <select id="abxy" onchange="saveAbxy(this.value)">
+      <option value="nintendo">任天堂(直译)</option>
+      <option value="xbox">Xbox(A/B、X/Y 交换)</option>
+    </select>
+  </label>
+  <div class="muted">切换布局后拔插手柄(或重启蓝牙)生效</div>
+</div>
+
+<div class="card">
+  <h2>日志 (/data/adb/joycond.log)</h2>
+  <div id="log">…</div>
+  <button onclick="refreshLog()">刷新日志</button>
+</div>
+
+<script>
+// ---- KernelSU / Magisk WebUI 命令执行桥 ----
+function out(ok, data){ return {errno: ok?0:1, stdout: data||""}; }
+async function sh(cmd){
+  try {
+    if (typeof ksu !== "undefined" && ksu.exec) {
+      return await new Promise(res=>{
+        const cb = "cb"+Math.random().toString(36).slice(2);
+        window[cb] = function(errno, stdout, stderr){
+          delete window[cb];
+          res({errno:errno, stdout:stdout||"", stderr:stderr||""});
+        };
+        ksu.exec(cmd, "{}", cb);
+      });
+    }
+    if (typeof run !== "undefined") return out(true, run(cmd));   // Magisk 风格
+    if (typeof execCommand !== "undefined") return out(true, execCommand(cmd));
+  } catch(e){ return out(false, String(e)); }
+  return out(false, "");
+}
+
+async function refresh(){
+  const s = (sel, ok, txt) => {
+    const el = document.querySelector(sel);
+    el.className = ok ? "ok" : "bad";
+    el.textContent = txt;
+  };
+  const r = await sh("ps -ef | grep -v grep | grep -q joycond && echo yes || echo no");
+  s("#st-daemon", r.stdout.trim()=="yes", r.stdout.trim()=="yes"?"运行中":"未运行");
+
+  const c = await sh("getevent -il 2>/dev/null | grep -q Combined && echo yes || echo no");
+  s("#st-combined", c.stdout.trim()=="yes", c.stdout.trim()=="yes"?"已合成 ✓":"未合成(需两只都连接)");
+
+  // 注:ksu.exec/su -c 会损坏复合 shell 语法,电量用单命令管道版
+  // 驱动只上报 4 档,映射为估算区间(驱动 hid-nintendo 的 capacity_level 语义)
+  const lvl = (t) => ({Full:"约 90-100%",High:"约 70-90%",Normal:"约 35-70%",Low:"约 10-35%",Critical:"低于 10%"}[t.trim()] || t.trim());
+  const batL = await sh("cat /sys/class/power_supply/nintendo_switch_controller_battery_0005:057E:2006.*/capacity_level 2>/dev/null");
+  const batR = await sh("cat /sys/class/power_supply/nintendo_switch_controller_battery_0005:057E:2007.*/capacity_level 2>/dev/null");
+  s("#st-left",  batL.stdout.trim() != "", batL.stdout.trim() ? ("已连接 · " + lvl(batL.stdout)) : "未连接");
+  s("#st-right", batR.stdout.trim() != "", batR.stdout.trim() ? ("已连接 · " + lvl(batR.stdout)) : "未连接");
+
+  const cfg = await sh("cat /data/adb/modules/joycond/config.json 2>/dev/null");
+  try {
+    const j = JSON.parse(cfg.stdout);
+    document.getElementById("scale").value = Math.round((j.rumble_scale||1)*100);
+    document.getElementById("scaleVal").textContent = Math.round((j.rumble_scale||1)*100)+"%";
+    document.getElementById("abxy").value = j.abxy||"nintendo";
+  } catch(e){}
+  refreshLog();
+}
+
+async function saveScale(){
+  const v = (parseInt(document.getElementById("scale").value)/100).toFixed(2);
+  await sh("sed -i 's/\"rumble_scale\": *[0-9.]*/\"rumble_scale\": "+v+"/' /data/adb/modules/joycond/config.json");
+  await sh("pkill joycond");   // service.sh 会自动带新参数拉起
+  alert("已应用:"+v+"(守护进程自动重启)");
+}
+
+async function saveAbxy(v){
+  await sh("sed -i 's/\"abxy\": *\"[a-z]*\"/\"abxy\": \""+v+"\"/' /data/adb/modules/joycond/config.json");
+  await sh("sh /data/adb/modules/joycond/service.sh remount");
+  await sh("pkill joycond"); // 重建合成设备,InputReader 重新读取 keylayout
+  alert("已切换:"+v+"。拔插手柄(或重启蓝牙)后生效。");
+}
+
+function rumble(strong, weak, ms){
+  sh("/dev/.joycond-bin/ff-test " + ms + " 0x" + strong.toString(16) + " 0x" + weak.toString(16));
+}
+
+let hdPid = null;
+async function hdDemo(){
+  await sh("pkill -f hd-test"); // 清掉可能对着失效 hidraw 的残留实例
+  await sh("nohup /dev/.joycond-bin/hd-test >/dev/null 2>&1 &");
+}
+async function hdStop(){
+  await sh("pkill -f hd-test");
+}
+
+async function refreshLog(){
+  const r = await sh("tail -n 30 /data/adb/joycond.log 2>/dev/null");
+  document.getElementById("log").textContent = r.stdout || "(空)";
+}
+
+refresh();
+</script>
+</body>
+</html>

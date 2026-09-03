@@ -77,6 +77,17 @@ index 0000000..fa92629
 +};
 +
 +#endif
+diff --git a/include/rumble_scale.h b/include/rumble_scale.h
+new file mode 100644
+index 0000000..92ac5ac
+--- /dev/null
++++ b/include/rumble_scale.h
+@@ -0,0 +1,5 @@
++#ifndef JOYCOND_RUMBLE_SCALE_H
++#define JOYCOND_RUMBLE_SCALE_H
++// 全局震动幅度系数(默认 1.0),由 --rumble-scale 设置,rumble_hidraw 应用
++extern float joycond_rumble_scale;
++#endif
 diff --git a/include/virt_ctlr_combined.h b/include/virt_ctlr_combined.h
 index f8c85a3..983fdf6 100644
 --- a/include/virt_ctlr_combined.h
@@ -104,6 +115,37 @@ index 6997557..f89dcc9 100644
  #include <libevdev/libevdev.h>
  
  //private
+diff --git a/src/main.cpp b/src/main.cpp
+index c43a5a9..e0f44e1 100644
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -1,6 +1,9 @@
++#include <cstdlib>
+ #include <iostream>
++#include <string>
+ #include "ctlr_mgr.h"
+ #include "epoll_mgr.h"
++#include "rumble_scale.h"
+ #if defined(ANDROID) || defined(__ANDROID__)
+ #include "ctlr_detector_android.h"
+ #include "android_log.h"
+@@ -10,6 +13,16 @@
+ 
+ int main(int argc, char *argv[])
+ {
++    // --rumble-scale <0.1-2.0>:hidraw 直通震动的总幅度系数(WebUI 可调)
++    for (int i = 1; i + 1 < argc; i++) {
++        if (std::string(argv[i]) == "--rumble-scale") {
++            float v = strtof(argv[i + 1], nullptr);
++            if (v >= 0.05f && v <= 2.0f)
++                joycond_rumble_scale = v;
++            break;
++        }
++    }
++
+     epoll_mgr epoll_manager;
+     ctlr_mgr ctlr_manager(epoll_manager);
+ #if defined(ANDROID) || defined(__ANDROID__)
 diff --git a/src/phys_ctlr.cpp b/src/phys_ctlr.cpp
 index 8d0e4a8..e4bd180 100644
 --- a/src/phys_ctlr.cpp
@@ -125,11 +167,12 @@ index 8d0e4a8..e4bd180 100644
  phys_ctlr::~phys_ctlr()
 diff --git a/src/rumble_hidraw.cpp b/src/rumble_hidraw.cpp
 new file mode 100644
-index 0000000..e8bb3c1
+index 0000000..2c14300
 --- /dev/null
 +++ b/src/rumble_hidraw.cpp
-@@ -0,0 +1,131 @@
+@@ -0,0 +1,146 @@
 +#include "rumble_hidraw.h"
++#include "rumble_scale.h"
 +
 +#include <glob.h>
 +#include <string.h>
@@ -159,6 +202,8 @@ index 0000000..e8bb3c1
 +    clock_gettime(CLOCK_MONOTONIC, &ts);
 +    return ts.tv_sec * 1000UL + ts.tv_nsec / 1000000UL;
 +}
++
++float joycond_rumble_scale = 1.0f;
 +
 +rumble_hidraw::rumble_hidraw() : fd(-1), pkt_num(0), last_send_ms(0), is_left(false)
 +{
@@ -246,6 +291,18 @@ index 0000000..e8bb3c1
 +
 +    unsigned char band[4];
 +    // FF_RUMBLE: strong_magnitude = LF 马达语义, weak = HF;映射到双频带幅度
++    // 用户强度系数(WebUI --rumble-scale),clamp 到协议安全范围
++    {
++        float s = joycond_rumble_scale;
++        if (s < 0.05f) s = 0.05f;
++        if (s > 2.0f) s = 2.0f;
++        unsigned scaled_w = (unsigned)(weak * s);
++        unsigned scaled_s = (unsigned)(strong * s);
++        if (scaled_w > 0xFFFF) scaled_w = 0xFFFF;
++        if (scaled_s > 0xFFFF) scaled_s = 0xFFFF;
++        weak = scaled_w;
++        strong = scaled_s;
++    }
 +    encode_band(band,
 +                HF_FREQ_DEFAULT,
 +                HF_AMP_OFF + (unsigned)weak * (HF_AMP_MAX - HF_AMP_OFF) / 0xFFFF,

@@ -114,7 +114,8 @@ and standard axes (`AXIS_X/Y/Z/RZ/HAT_X/HAT_Y`). Any game with controller suppor
 or a gamepad tester app — should now work.
 
 
-HD rumble demo (both pads vibrate in sync; 5 looping waveform sketches):
+HD rumble demo (both pads vibrate in sync; 4 looping waveform sketches:
+marble roll, heartbeat, raindrops, frequency sweep):
 
 ```bash
 adb push hd-test → /data/local/tmp/   # see nix/hd-test.nix

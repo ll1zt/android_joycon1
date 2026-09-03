@@ -42,6 +42,8 @@
         };
         kernelsu-module = pkgs.callPackage ./nix/module.nix {
           joycond = self.packages.${system}.joycond-android;
+          "ff-test" = self.packages.${system}."ff-test-android";
+          "hd-test" = self.packages.${system}."hd-test-android";
           moduleSrc = builtins.path {
             path = ./module;
             name = "joycond-module-src";

@@ -108,7 +108,7 @@ adb shell 'dumpsys input | grep -A8 Combined'       # 框架视角
 `AXIS_X/Y/Z/RZ/HAT_X/HAT_Y`。任何支持手柄的游戏此时应直接可用。
 
 
-HD 震动演示(双手柄同步,5 段循环波形:弹珠滚动/心跳/雨滴/扫频/引擎):
+HD 震动演示(双手柄同步,4 段循环波形:弹珠滚动/心跳/雨滴/滑音):
 
 ```bash
 adb push $(nix build --no-link --print-out-paths .#hd-test-android)/bin/hd-test /data/local/tmp/

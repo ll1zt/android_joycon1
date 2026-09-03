@@ -59,7 +59,7 @@ Amplitude encodings are asymmetric: LF amp `0x40 = 0.0f … 0x72 = 1.0f`
 Both bands of a pad's single LRA can be driven simultaneously, and frames can
 be streamed at up to 60 Hz — that is exactly how Switch games produce "HD
 rumble" textures (rolling marbles, rain, engine revs). `hd-test` demonstrates
-this with five looped waveforms.
+this with four looped waveforms.
 
 ## Build architecture (Nix flakes)
 

@@ -68,9 +68,15 @@ place_cfg_files() {
   for f in 2006 2007 2008; do
     cp -f "$MODDIR/idc/Vendor_057e_Product_$f.idc" "$IDCD/" 2>>"$LOG" || { log "copy idc $f failed"; return 1; }
   done
-  chmod 644 "$KLD"/* "$IDCD"/* 2>>"$LOG"
-  # 保险:标签正常由父目录继承,但目录若曾被其他域创建过则可能不对,显式修正
-  chcon -R u:object_r:system_data_file:s0 "$KLD" "$IDCD" 2>>"$LOG"
+  # 只碰自有文件:目录可能被其他组件共享,整目录 chmod/chcon 会误伤,
+  # 且 chmod 644 落在子目录上会剥掉 x 位
+  for f in "$KLD/Vendor_057e_Product_2008.kl" \
+           "$IDCD/Vendor_057e_Product_2006.idc" \
+           "$IDCD/Vendor_057e_Product_2007.idc" \
+           "$IDCD/Vendor_057e_Product_2008.idc"; do
+    chmod 644 "$f" 2>>"$LOG"
+    chcon u:object_r:system_data_file:s0 "$f" 2>>"$LOG"
+  done
   log "keylayout/idc placed in $KLD $IDCD"
 }
 

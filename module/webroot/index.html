@@ -97,7 +97,8 @@ async function refresh(){
     el.className = ok ? "ok" : "bad";
     el.textContent = txt;
   };
-  const r = await sh("ps -ef | grep -v grep | grep -q joycond && echo yes || echo no");
+  // 注意不能用 ps|grep:supervisor 的 cmdline 含 "joycond"(脚本路径),会恒真
+  const r = await sh("pidof joycond >/dev/null 2>&1 && echo yes || echo no");
   s("#st-daemon", r.stdout.trim()=="yes", r.stdout.trim()=="yes"?"运行中":"未运行");
 
   const c = await sh("getevent -il 2>/dev/null | grep -q Combined && echo yes || echo no");
@@ -141,11 +142,11 @@ function rumble(strong, weak, ms){
 
 let hdPid = null;
 async function hdDemo(){
-  await sh("pkill -f hd-test"); // 清掉可能对着失效 hidraw 的残留实例
+  await sh("pkill -x hd-test"); // 清掉可能对着失效 hidraw 的残留实例(-x 精确名匹配,-f 会连杀包装 shell)
   await sh("nohup /dev/.joycond-bin/hd-test >/dev/null 2>&1 &");
 }
 async function hdStop(){
-  await sh("pkill -f hd-test");
+  await sh("pkill -x hd-test");
 }
 
 async function refreshLog(){

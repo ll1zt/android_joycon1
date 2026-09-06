@@ -107,11 +107,17 @@ while true; do
     START=$(date +%s)
     "$BIN/joycond" --rumble-scale "$SCALE" >> "$LOG" 2>&1
     RC=$?
-    N=$((N+1))
-    # 单次运行超过 60s 视为干净退出(手柄全断开/WebUI pkill),退避只针对崩溃循环
-    [ $(( $(date +%s) - START )) -ge 60 ] && N=0
-    log "joycond exited rc=$RC (restart #$N)"
-    [ $((N % 10)) -eq 0 ] && { log "backoff 60s"; sleep 60; }
+    # 单次运行超过 60s 视为干净退出(手柄全断开/WebUI pkill),退避只针对崩溃循环。
+    # 注意:清零分支不能落到下面的取模检查——N=0 时 N%%10==0 恒真,每次干净退出
+    # 都会误触发 60s backoff(v1.1.1 引入,2026-09-06 真机抓到)
+    if [ $(( $(date +%s) - START )) -ge 60 ]; then
+        N=0
+        log "joycond exited rc=$RC (clean run >= 60s; counter reset)"
+    else
+        N=$((N+1))
+        log "joycond exited rc=$RC (restart #$N)"
+        [ $((N % 10)) -eq 0 ] && { log "backoff 60s"; sleep 60; }
+    fi
   else
     log "binary missing, waiting"; sleep 30; continue
   fi

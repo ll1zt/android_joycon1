@@ -402,7 +402,7 @@ index 0000000..5e581fa
 +    last_send_ms = 0;   // 停震后允许下一个 play 立即生效,不被前沿节流吞掉
 +}
 diff --git a/src/virt_ctlr_combined.cpp b/src/virt_ctlr_combined.cpp
-index ce5ea9a..7f83843 100644
+index ce5ea9a..8cffd13 100644
 --- a/src/virt_ctlr_combined.cpp
 +++ b/src/virt_ctlr_combined.cpp
 @@ -1,7 +1,10 @@
@@ -568,7 +568,7 @@ index ce5ea9a..7f83843 100644
  
                              if (ioctl(get_uinput_fd(), UI_END_FF_ERASE, &erase))
                                  std::cerr << "Failed to end uinput_ff_erase: " << strerror(errno) << std::endl;
-@@ -340,15 +432,108 @@ virt_ctlr_combined::virt_ctlr_combined(std::shared_ptr<phys_ctlr> physl, std::sh
+@@ -340,15 +432,110 @@ virt_ctlr_combined::virt_ctlr_combined(std::shared_ptr<phys_ctlr> physl, std::sh
      int flags = fcntl(get_uinput_fd(), F_GETFL, 0);
      fcntl(get_uinput_fd(), F_SETFL, flags | O_NONBLOCK);
  
@@ -582,6 +582,9 @@ index ce5ea9a..7f83843 100644
 +    std::vector<int> sub_fds({get_uinput_fd()});
 +    if (stop_timer_fd >= 0)
 +        sub_fds.push_back(stop_timer_fd);
++    /* TEMP DEBUG */
++    std::cerr << "combined ctor: uifd=" << get_uinput_fd()
++              << " stop_timer_fd=" << stop_timer_fd << std::endl;
 +    subscriber = std::make_shared<epoll_subscriber>(sub_fds,
                                                      [=](int event_fd){handle_events(event_fd);});
      epoll_manager.add_subscriber(subscriber);
@@ -590,6 +593,8 @@ index ce5ea9a..7f83843 100644
 +/* length_ms=0 表示解除定时(应用主动 stop 后不再补刀) */
 +void virt_ctlr_combined::arm_stop_timer(unsigned int length_ms)
 +{
++    /* TEMP DEBUG */
++    std::cerr << "arm_stop_timer(" << length_ms << ") fd=" << stop_timer_fd << std::endl;
 +    if (stop_timer_fd < 0)
 +        return;
 +    struct itimerspec its;
@@ -604,14 +609,11 @@ index ce5ea9a..7f83843 100644
 +/* 到点自动停:读清 timerfd,对两只手柄补发中性包 */
 +void virt_ctlr_combined::handle_stop_timer()
 +{
++    /* TEMP DEBUG: 每次 fire 都记录,定位完成后移除 */
 +    uint64_t expirations;
 +    while (read(stop_timer_fd, &expirations, sizeof(expirations)) == sizeof(expirations))
 +        ;
-+    static bool logged = false;
-+    if (!logged) {
-+        logged = true;
-+        std::cerr << "rumble auto-stop fired (replay timer)" << std::endl;
-+    }
++    std::cerr << "rumble auto-stop fired (replay timer)" << std::endl;
 +    if (physl && physl->get_rumble().is_open())
 +        physl->get_rumble().stop();
 +    if (physr && physr->get_rumble().is_open())
@@ -678,7 +680,7 @@ index ce5ea9a..7f83843 100644
      libevdev_uinput_destroy(uidev);
      close(uifd);
      libevdev_free(virt_evdev);
-@@ -362,6 +547,8 @@ void virt_ctlr_combined::handle_events(int fd)
+@@ -362,6 +549,8 @@ void virt_ctlr_combined::handle_events(int fd)
          relay_events(physr);
      else if (fd == get_uinput_fd())
          handle_uinput_event();
@@ -687,7 +689,7 @@ index ce5ea9a..7f83843 100644
      else
          std::cerr << "fd=" << fd << " is an invalid fd for this combined controller\n";
  }
-@@ -399,6 +586,8 @@ int virt_ctlr_combined::get_uinput_fd()
+@@ -399,6 +588,8 @@ int virt_ctlr_combined::get_uinput_fd()
  
  void virt_ctlr_combined::remove_phys_ctlr(const std::shared_ptr<phys_ctlr> phys)
  {

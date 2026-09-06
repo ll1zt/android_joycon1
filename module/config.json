@@ -1,4 +1,5 @@
 {
   "rumble_scale": 1.0,
-  "abxy": "nintendo"
+  "abxy": "nintendo",
+  "envelope": true
 }

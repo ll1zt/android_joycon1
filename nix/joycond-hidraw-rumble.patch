@@ -28,10 +28,10 @@ index b480d59..bc39250 100644
  #endif
 diff --git a/include/rumble_hidraw.h b/include/rumble_hidraw.h
 new file mode 100644
-index 0000000..ed30571
+index 0000000..be70a16
 --- /dev/null
 +++ b/include/rumble_hidraw.h
-@@ -0,0 +1,50 @@
+@@ -0,0 +1,54 @@
 +#ifndef JOYCOND_RUMBLE_HIDRAW_H
 +#define JOYCOND_RUMBLE_HIDRAW_H
 +
@@ -63,6 +63,8 @@ index 0000000..ed30571
 +        int find_hidraw_fd(const std::string &devpath);
 +        /* fd 失效时按 last_devpath 重开,限频 REOPEN_INTERVAL_MS 防 sysfs glob 刷屏 */
 +        void ensure_open();
++        /* 缩放+查表+频率联动+写帧,send/send_fraction 共用 */
++        void encode_and_write(unsigned short strong, unsigned short weak);
 +        int write_report(const unsigned char self[4], bool is_left);
 +
 +    public:
@@ -74,8 +76,10 @@ index 0000000..ed30571
 +         * 返回是否成功打开 hidraw */
 +        bool open_for(const std::string &devpath, bool is_left);
 +        bool is_open() const { return fd >= 0; }
-+        /* strong/weak: FF_RUMBLE 的 0..0xFFFF 幅度,映射到 LF/HF 频段 */
++        /* strong/weak: FF_RUMBLE 的 0..0xFFFF 幅度,映射到 LF/HF 频段(带重发节流) */
 +        void send(unsigned short strong, unsigned short weak);
++        /* 包络流式帧:强/弱为 0..0xFFFF 幅度,不做节流(调用方按 60Hz 节拍) */
++        void send_fraction(unsigned short strong, unsigned short weak);
 +        /* 停震：连发 5 个中性包（对齐内核 JC_RUMBLE_ZERO_AMP_PKT_CNT，抗 BT 丢包） */
 +        void stop();
 +        void close();
@@ -84,20 +88,22 @@ index 0000000..ed30571
 +#endif
 diff --git a/include/rumble_scale.h b/include/rumble_scale.h
 new file mode 100644
-index 0000000..92ac5ac
+index 0000000..55cb63e
 --- /dev/null
 +++ b/include/rumble_scale.h
-@@ -0,0 +1,5 @@
+@@ -0,0 +1,7 @@
 +#ifndef JOYCOND_RUMBLE_SCALE_H
 +#define JOYCOND_RUMBLE_SCALE_H
 +// 全局震动幅度系数(默认 1.0),由 --rumble-scale 设置,rumble_hidraw 应用
 +extern float joycond_rumble_scale;
++// HD 包络+频率联动总开关(默认开),由 --envelope 设置;关 = v1.2.x 单帧行为
++extern bool joycond_envelope;
 +#endif
 diff --git a/include/virt_ctlr_combined.h b/include/virt_ctlr_combined.h
-index f8c85a3..867be90 100644
+index f8c85a3..8dd0367 100644
 --- a/include/virt_ctlr_combined.h
 +++ b/include/virt_ctlr_combined.h
-@@ -20,11 +20,28 @@ class virt_ctlr_combined : public virt_ctlr
+@@ -20,11 +20,35 @@ class virt_ctlr_combined : public virt_ctlr
          struct libevdev_uinput *uidev;
          int uifd;
          std::map<int, std::pair<struct ff_effect, struct ff_effect>> rumble_effects;
@@ -113,13 +119,20 @@ index f8c85a3..867be90 100644
 +         * 的客户端(直写 evdev 的模拟器等)会让手柄一直震。play 时挂一次性 timerfd,
 +         * 到点补发中性包。Android 框架路径有 cancelVibrate 兜底,不受影响 */
 +        int stop_timer_fd;
++        /* HD 包络:单个活跃流(后 play 覆盖前 play)。攻击 32ms 渐起、恒定段零帧
++         * (LRA 保持最后幅度,不写=零带宽)、衰减尾部渐降、中性包收尾 */
++        bool rumble_streaming;
++        unsigned int rumble_stream_len_ms;
++        unsigned long rumble_stream_start_ms;
++        struct rumble_mags rumble_stream;
          std::string left_mac;
          std::string right_mac;
  
          void relay_events(std::shared_ptr<phys_ctlr> phys);
          void handle_uinput_event();
 +        void arm_stop_timer(unsigned int length_ms);   /* 0 = 解除 */
-+        void handle_stop_timer();
++        void arm_envelope_timer();                     /* 60Hz 重复节拍 */
++        void handle_effect_timer();
 +        /* 被移除手柄的残留状态清零:按住按键/摇杆离中位时休眠或被拔,
 +         * 合成设备会永久卡在该状态(游戏"卡键")。映射与 relay_events 一致 */
 +        void clear_phys_state(std::shared_ptr<phys_ctlr> phys);
@@ -127,7 +140,7 @@ index f8c85a3..867be90 100644
          virt_ctlr_combined(std::shared_ptr<phys_ctlr> physl, std::shared_ptr<phys_ctlr> physr, epoll_mgr& epoll_manager);
          virtual ~virt_ctlr_combined();
 diff --git a/src/main.cpp b/src/main.cpp
-index c43a5a9..e0f44e1 100644
+index c43a5a9..99b7a1c 100644
 --- a/src/main.cpp
 +++ b/src/main.cpp
 @@ -1,6 +1,9 @@
@@ -140,17 +153,20 @@ index c43a5a9..e0f44e1 100644
  #if defined(ANDROID) || defined(__ANDROID__)
  #include "ctlr_detector_android.h"
  #include "android_log.h"
-@@ -10,6 +13,16 @@
+@@ -10,6 +13,19 @@
  
  int main(int argc, char *argv[])
  {
 +    // --rumble-scale <0.1-2.0>:hidraw 直通震动的总幅度系数(WebUI 可调)
++    // --envelope <0|1|false|true>:HD 包络+频率联动总开关(默认开)
 +    for (int i = 1; i + 1 < argc; i++) {
 +        if (std::string(argv[i]) == "--rumble-scale") {
 +            float v = strtof(argv[i + 1], nullptr);
 +            if (v >= 0.05f && v <= 2.0f)
 +                joycond_rumble_scale = v;
-+            break;
++        } else if (std::string(argv[i]) == "--envelope") {
++            std::string v = argv[i + 1];
++            joycond_envelope = (v != "0" && v != "false");
 +        }
 +    }
 +
@@ -178,10 +194,10 @@ index 8d0e4a8..7867767 100644
  phys_ctlr::~phys_ctlr()
 diff --git a/src/rumble_hidraw.cpp b/src/rumble_hidraw.cpp
 new file mode 100644
-index 0000000..2f3a199
+index 0000000..7a93cdb
 --- /dev/null
 +++ b/src/rumble_hidraw.cpp
-@@ -0,0 +1,246 @@
+@@ -0,0 +1,267 @@
 +#include "rumble_hidraw.h"
 +#include "rumble_scale.h"
 +
@@ -284,6 +300,7 @@ index 0000000..2f3a199
 +}
 +
 +float joycond_rumble_scale = 1.0f;
++bool joycond_envelope = true;
 +
 +rumble_hidraw::rumble_hidraw() : fd(-1), pkt_num(0), last_send_ms(0), is_left(false),
 +                                 last_reopen_ms(0)
@@ -368,42 +385,37 @@ index 0000000..2f3a199
 +    return write(fd, buf, sizeof(buf));
 +}
 +
-+void rumble_hidraw::send(unsigned short strong, unsigned short weak)
++/* 统一编码写出:用户系数缩放(clamp)→ 内核感知表 → 幅度-频率联动 → 0x10 帧。
++ * FF_RUMBLE: strong = LF 马达语义, weak = HF;表里 amp=0 首项保证零输入编零幅度。
++ * HD 联动:力度越大 LF 越高(62→87Hz)、HF 越高(95→124Hz),冲击更"实";
++ * HF 频率低字节封顶 0x34,与最大 HF 幅度 0xC8 相加不溢出(0x34+0xC8=0xFC)。
++ * 关闭 HD(envelope=0)时退回固定 95/62Hz(v1.2.x 行为)。 */
++void rumble_hidraw::encode_and_write(unsigned short strong, unsigned short weak)
 +{
-+    ensure_open();
-+    if (fd < 0)
-+        return;
++    float s = joycond_rumble_scale;
++    if (s < 0.05f) s = 0.05f;
++    if (s > 2.0f) s = 2.0f;
++    unsigned scaled_w = (unsigned)(weak * s);
++    unsigned scaled_s = (unsigned)(strong * s);
++    if (scaled_w > 0xFFFF) scaled_w = 0xFFFF;
++    if (scaled_s > 0xFFFF) scaled_s = 0xFFFF;
 +
-+    unsigned long now = now_ms();
-+    if (now - last_send_ms < MIN_INTERVAL_MS)
-+        return;
-+    last_send_ms = now;
-+
-+    // 用户强度系数(WebUI --rumble-scale),先在线性输入域缩放,clamp 防溢出
-+    {
-+        float s = joycond_rumble_scale;
-+        if (s < 0.05f) s = 0.05f;
-+        if (s > 2.0f) s = 2.0f;
-+        unsigned scaled_w = (unsigned)(weak * s);
-+        unsigned scaled_s = (unsigned)(strong * s);
-+        if (scaled_w > 0xFFFF) scaled_w = 0xFFFF;
-+        if (scaled_s > 0xFFFF) scaled_s = 0xFFFF;
-+        weak = scaled_w;
-+        strong = scaled_s;
-+    }
-+
-+    // FF_RUMBLE: strong = LF 马达语义, weak = HF。
-+    // 与内核 joycon_play_effect 相同的两步:输入 0..0xFFFF 线性映射到 0..1003,
-+    // 再查感知表。表里 amp=0 的首项保证零输入编出零幅度。
++    // 与内核 joycon_play_effect 相同的两步:输入 0..0xFFFF 线性映射到 0..1003,再查感知表
 +    const struct rumble_amp_data *amp_lf =
-+        find_rumble_amp((unsigned int)strong * RUMBLE_MAX_AMP / 0xFFFF);
++        find_rumble_amp((unsigned int)scaled_s * RUMBLE_MAX_AMP / 0xFFFF);
 +    const struct rumble_amp_data *amp_hf =
-+        find_rumble_amp((unsigned int)weak * RUMBLE_MAX_AMP / 0xFFFF);
++        find_rumble_amp((unsigned int)scaled_w * RUMBLE_MAX_AMP / 0xFFFF);
++
++    unsigned char lf_freq = LF_FREQ_CODE_LOW, hf_freq = HF_FREQ_CODE_LOW;
++    if (joycond_envelope) {
++        lf_freq = LF_FREQ_CODE_LOW + scaled_s * 100 / 0xFFFF / 4;  // 0x14..0x32
++        hf_freq = HF_FREQ_CODE_LOW + scaled_w * 100 / 0xFFFF / 8;  // 0x28..0x34
++    }
 +
 +    unsigned char band[4];
 +    band[0] = 0x20;                                 // HF 频率高字节(95Hz)
-+    band[1] = HF_FREQ_CODE_LOW + amp_hf->hf;        // HF 频率低字节 + HF 幅度
-+    band[2] = LF_FREQ_CODE_LOW + (amp_lf->lf >> 8); // LF 频率低字节 + LF 幅度高位
++    band[1] = hf_freq + amp_hf->hf;                 // HF 频率低字节 + HF 幅度
++    band[2] = lf_freq + (amp_lf->lf >> 8);          // LF 频率低字节 + LF 幅度高位
 +    band[3] = amp_lf->lf & 0xFF;                    // LF 幅度低字节
 +
 +    if (write_report(band, is_left) < 0) {
@@ -418,6 +430,31 @@ index 0000000..2f3a199
 +    }
 +}
 +
++void rumble_hidraw::send(unsigned short strong, unsigned short weak)
++{
++    ensure_open();
++    if (fd < 0)
++        return;
++
++    unsigned long now = now_ms();
++    if (now - last_send_ms < MIN_INTERVAL_MS)
++        return;
++    last_send_ms = now;
++
++    encode_and_write(strong, weak);
++}
++
++/* 包络流式帧:调用方(virt_ctlr_combined 的 60Hz tick)已按节拍驱动,
++ * 不再做重发节流——节流会吃掉包络的台阶帧 */
++void rumble_hidraw::send_fraction(unsigned short strong, unsigned short weak)
++{
++    ensure_open();
++    if (fd < 0)
++        return;
++
++    encode_and_write(strong, weak);
++}
++
 +void rumble_hidraw::stop()
 +{
 +    ensure_open();
@@ -429,7 +466,7 @@ index 0000000..2f3a199
 +    last_send_ms = 0;   // 停震后允许下一个 play 立即生效,不被前沿节流吞掉
 +}
 diff --git a/src/virt_ctlr_combined.cpp b/src/virt_ctlr_combined.cpp
-index ce5ea9a..62c029c 100644
+index ce5ea9a..a5bbdf9 100644
 --- a/src/virt_ctlr_combined.cpp
 +++ b/src/virt_ctlr_combined.cpp
 @@ -1,7 +1,10 @@
@@ -485,7 +522,7 @@ index ce5ea9a..62c029c 100644
                              std::cerr << "ERROR: ff_effect with id=" << ev.code << " is not in map\n";
                      } else {
                          redirectedl.code = rumble_effects[ev.code].first.id;
-@@ -111,6 +136,37 @@ void virt_ctlr_combined::handle_uinput_event()
+@@ -111,6 +136,53 @@ void virt_ctlr_combined::handle_uinput_event()
                          if (write(physr->get_fd(), &redirectedr, sizeof(redirectedr)) != sizeof(redirectedr))
                              std::cerr << "Failed to forward EV_FF to physr\n";
                      }
@@ -504,14 +541,30 @@ index ce5ea9a..62c029c 100644
 +                                      << ev.code << ", dropped\n";
 +                        }
 +                    } else if (ev.value) {
-+                        /* send/stop 自带 ensure_open 守卫,不再按 is_open() 短路,
-+                         * 否则 hidraw 晚就绪的 pad 永远没有重开机会 */
-+                        if (physl)
-+                            physl->get_rumble().send(mag_it->second.strong, mag_it->second.weak);
-+                        if (physr)
-+                            physr->get_rumble().send(mag_it->second.strong, mag_it->second.weak);
-+                        /* replay.length 到点自动停:补齐被 uinput 旁路掉的内核定时器 */
-+                        arm_stop_timer(mag_it->second.length_ms);
++                        /* HD 包络:长效果走 60Hz 流——首帧 50% 渐起,恒定段零帧,
++                         * 衰减尾部渐降,中性包收尾。短效果保持单帧满幅(咔嗒要冲劲) */
++                        if (joycond_envelope && mag_it->second.length_ms >= ENVELOPE_MIN_MS) {
++                            rumble_streaming = true;
++                            rumble_stream = mag_it->second;
++                            rumble_stream_len_ms = mag_it->second.length_ms;
++                            rumble_stream_start_ms = ff_now_ms();
++                            if (physl)
++                                physl->get_rumble().send_fraction(mag_it->second.strong / 2,
++                                                                  mag_it->second.weak / 2);
++                            if (physr)
++                                physr->get_rumble().send_fraction(mag_it->second.strong / 2,
++                                                                  mag_it->second.weak / 2);
++                            arm_envelope_timer();
++                        } else {
++                            /* send/stop 自带 ensure_open 守卫,不再按 is_open() 短路,
++                             * 否则 hidraw 晚就绪的 pad 永远没有重开机会 */
++                            if (physl)
++                                physl->get_rumble().send(mag_it->second.strong, mag_it->second.weak);
++                            if (physr)
++                                physr->get_rumble().send(mag_it->second.strong, mag_it->second.weak);
++                            /* replay.length 到点自动停:补齐被 uinput 旁路掉的内核定时器 */
++                            arm_stop_timer(mag_it->second.length_ms);
++                        }
 +                    } else {
 +                        if (physl)
 +                            physl->get_rumble().stop();
@@ -523,7 +576,7 @@ index ce5ea9a..62c029c 100644
                      break;
                  }
  
-@@ -129,6 +185,13 @@ void virt_ctlr_combined::handle_uinput_event()
+@@ -129,6 +201,13 @@ void virt_ctlr_combined::handle_uinput_event()
                                  std::cerr << "Failed to get uinput_ff_upload: " << strerror(errno) << std::endl;
  
                              effect = upload.effect;
@@ -537,7 +590,7 @@ index ce5ea9a..62c029c 100644
                              /* Check if already allocated or it needs an update */
                              allocate_new_effect = !rumble_effects.count(effect.id);
                              if (allocate_new_effect)
-@@ -155,10 +218,29 @@ void virt_ctlr_combined::handle_uinput_event()
+@@ -155,10 +234,29 @@ void virt_ctlr_combined::handle_uinput_event()
  
                              upload.effect = effect;
  
@@ -569,7 +622,7 @@ index ce5ea9a..62c029c 100644
                                  rumble_effects[effect.id] = std::make_pair(effect_l, effect_r);
  
                              if (ioctl(get_uinput_fd(), UI_END_FF_UPLOAD, &upload))
-@@ -184,12 +266,24 @@ void virt_ctlr_combined::handle_uinput_event()
+@@ -184,12 +282,24 @@ void virt_ctlr_combined::handle_uinput_event()
                                      erase.retval = errno;
                              }
  
@@ -597,12 +650,13 @@ index ce5ea9a..62c029c 100644
  
                              if (ioctl(get_uinput_fd(), UI_END_FF_ERASE, &erase))
                                  std::cerr << "Failed to end uinput_ff_erase: " << strerror(errno) << std::endl;
-@@ -340,15 +434,105 @@ virt_ctlr_combined::virt_ctlr_combined(std::shared_ptr<phys_ctlr> physl, std::sh
+@@ -340,15 +450,165 @@ virt_ctlr_combined::virt_ctlr_combined(std::shared_ptr<phys_ctlr> physl, std::sh
      int flags = fcntl(get_uinput_fd(), F_GETFL, 0);
      fcntl(get_uinput_fd(), F_SETFL, flags | O_NONBLOCK);
  
 -    subscriber = std::make_shared<epoll_subscriber>(std::vector({get_uinput_fd()}),
-+    /* 震动自动停定时器:fd 挂进与 uinput 相同的订阅,一次性触发 */
++    /* 震动自动停/包络定时器:fd 挂进与 uinput 相同的订阅 */
++    rumble_streaming = false;
 +    stop_timer_fd = timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK | TFD_CLOEXEC);
 +    if (stop_timer_fd < 0)
 +        std::cerr << "timerfd_create failed; rumble auto-stop disabled; "
@@ -630,19 +684,78 @@ index ce5ea9a..62c029c 100644
 +    timerfd_settime(stop_timer_fd, 0, &its, NULL);
 +}
 +
-+/* 到点自动停:读清 timerfd,对两只手柄补发中性包 */
-+void virt_ctlr_combined::handle_stop_timer()
++/* 60Hz 重复节拍,驱动包络状态机 */
++void virt_ctlr_combined::arm_envelope_timer()
++{
++    if (stop_timer_fd < 0)
++        return;
++    struct itimerspec its;
++    memset(&its, 0, sizeof(its));
++    its.it_value.tv_nsec = ENVELOPE_TICK_MS * 1000000L;
++    its.it_interval.tv_nsec = ENVELOPE_TICK_MS * 1000000L;
++    timerfd_settime(stop_timer_fd, 0, &its, NULL);
++}
++
++/* 包络/自动停共用 60Hz 重复节拍;tick 按 elapsed 分相,恒定段不写帧 */
++void virt_ctlr_combined::handle_effect_timer()
 +{
 +    uint64_t expirations;
 +    while (read(stop_timer_fd, &expirations, sizeof(expirations)) == sizeof(expirations))
 +        ;
-+    /* fire 是低频事件(每个未 stop 的 play 一次),直接记录,便于日后验收 */
-+    std::cerr << "rumble auto-stop fired (replay timer)" << std::endl;
-+    if (physl && physl->get_rumble().is_open())
-+        physl->get_rumble().stop();
-+    if (physr && physr->get_rumble().is_open())
-+        physr->get_rumble().stop();
++
++    if (!rumble_streaming) {
++        /* 短效果的一次性自动停(低频,直接记录) */
++        std::cerr << "rumble auto-stop fired (replay timer)" << std::endl;
++        if (physl)
++            physl->get_rumble().stop();
++        if (physr)
++            physr->get_rumble().stop();
++        return;
++    }
++
++    unsigned long elapsed = ff_now_ms() - rumble_stream_start_ms;
++    if (elapsed >= rumble_stream_len_ms) {
++        /* 衰减完成:中性包收尾(5 连发抗 BT 丢包),解除定时 */
++        static bool logged = false;
++        if (!logged) {
++            logged = true;
++            std::cerr << "rumble envelope finished (auto-stop)" << std::endl;
++        }
++        rumble_streaming = false;
++        arm_stop_timer(0);
++        if (physl)
++            physl->get_rumble().stop();
++        if (physr)
++            physr->get_rumble().stop();
++        return;
++    }
++
++    unsigned decay_ms = rumble_stream_len_ms / 3;
++    if (decay_ms > 300)
++        decay_ms = 300;
++    if (decay_ms < 32)
++        decay_ms = 32;
++    unsigned f;
++    if (elapsed < ATTACK_MS)
++        f = 0x8000 + (elapsed << 15) / ATTACK_MS;                 /* 50%→100% */
++    else if (elapsed + decay_ms >= rumble_stream_len_ms)
++        f = (rumble_stream_len_ms - elapsed) * 0xFFFF / decay_ms; /* →0 */
++    else
++        return;   /* 恒定段:LRA 保持幅度,零帧零带宽 */
++    if (physl)
++        physl->get_rumble().send_fraction(
++            (unsigned)rumble_stream.strong * f / 0xFFFF,
++            (unsigned)rumble_stream.weak * f / 0xFFFF);
++    if (physr)
++        physr->get_rumble().send_fraction(
++            (unsigned)rumble_stream.strong * f / 0xFFFF,
++            (unsigned)rumble_stream.weak * f / 0xFFFF);
 +}
++
++// 包络参数:低于 120ms 不做包络(短咔嗒要冲劲);攻击 32ms=2 帧@60Hz
++#define ENVELOPE_MIN_MS 120
++#define ATTACK_MS 32
++#define ENVELOPE_TICK_MS 16
 +
 +/* 被移除手柄的残留状态清零(键全部释放、轴回中),映射与 relay_events 一致 */
 +void virt_ctlr_combined::clear_phys_state(std::shared_ptr<phys_ctlr> phys)
@@ -704,16 +817,16 @@ index ce5ea9a..62c029c 100644
      libevdev_uinput_destroy(uidev);
      close(uifd);
      libevdev_free(virt_evdev);
-@@ -362,6 +546,8 @@ void virt_ctlr_combined::handle_events(int fd)
+@@ -362,6 +622,8 @@ void virt_ctlr_combined::handle_events(int fd)
          relay_events(physr);
      else if (fd == get_uinput_fd())
          handle_uinput_event();
 +    else if (stop_timer_fd >= 0 && fd == stop_timer_fd)
-+        handle_stop_timer();
++        handle_effect_timer();
      else
          std::cerr << "fd=" << fd << " is an invalid fd for this combined controller\n";
  }
-@@ -399,6 +585,8 @@ int virt_ctlr_combined::get_uinput_fd()
+@@ -399,6 +661,8 @@ int virt_ctlr_combined::get_uinput_fd()
  
  void virt_ctlr_combined::remove_phys_ctlr(const std::shared_ptr<phys_ctlr> phys)
  {

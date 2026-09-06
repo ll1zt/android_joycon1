@@ -61,6 +61,13 @@
       <option value="xbox">Xbox(A/B、X/Y 交换)</option>
     </select>
   </label>
+  <div style="height:8px"></div>
+  <label>HD 包络(起振/收尾渐变+频率联动)
+    <select id="envsel" onchange="saveEnv(this.value)">
+      <option value="1">开(默认)</option>
+      <option value="0">关</option>
+    </select>
+  </label>
   <div class="muted">切换布局后拔插手柄(或重启蓝牙)生效</div>
 </div>
 
@@ -118,6 +125,7 @@ async function refresh(){
     document.getElementById("scale").value = Math.round((j.rumble_scale||1)*100);
     document.getElementById("scaleVal").textContent = Math.round((j.rumble_scale||1)*100)+"%";
     document.getElementById("abxy").value = j.abxy||"nintendo";
+    document.getElementById("envsel").value = (j.envelope === false) ? "0" : "1";
   } catch(e){}
   refreshLog();
 }
@@ -136,6 +144,13 @@ async function saveAbxy(v){
   await sh("/dev/.joycond-bin/ff-test 10 0 0"); // 同 saveScale:先停震再杀
   await sh("pkill joycond"); // 重建合成设备,InputReader 重新读取 keylayout
   alert("已切换:"+v+"。拔插手柄(或重启蓝牙)后生效。");
+}
+
+async function saveEnv(v){
+  await sh("sed -i 's/\"envelope\": *[a-z]*/\"envelope\": "+v+"/' /data/adb/modules/joycond/config.json");
+  await sh("/dev/.joycond-bin/ff-test 10 0 0");
+  await sh("pkill joycond"); // service.sh 自动带新参数拉起
+  alert("HD 包络已"+(v=="1"?"开启":"关闭"));
 }
 
 function rumble(strong, weak, ms){

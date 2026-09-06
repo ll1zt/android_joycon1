@@ -58,7 +58,8 @@ place_bins() {
 place_cfg_files() {
   SCALE=$(json rumble_scale 1.0)
   ABXY=$(json abxy nintendo)
-  log "config: rumble_scale=$SCALE abxy=$ABXY"
+  ENVELOPE=$(json envelope 1)
+  log "config: rumble_scale=$SCALE abxy=$ABXY envelope=$ENVELOPE"
   # 文件名固定为主名(InputReader 只匹配 Vendor_VVVV_Product_PPPP.kl)
   KL_SRC="$MODDIR/kl/Vendor_057e_Product_2008.kl"
   [ "$ABXY" = "xbox" ] && KL_SRC="$MODDIR/kl/Vendor_057e_Product_2008_swap.kl"
@@ -104,8 +105,9 @@ while true; do
   fi
   if [ -x "$BIN/joycond" ]; then
     SCALE=$(json rumble_scale 1.0)
+    ENVELOPE=$(json envelope 1)
     START=$(date +%s)
-    "$BIN/joycond" --rumble-scale "$SCALE" >> "$LOG" 2>&1
+    "$BIN/joycond" --rumble-scale "$SCALE" --envelope "$ENVELOPE" >> "$LOG" 2>&1
     RC=$?
     # 单次运行超过 60s 视为干净退出(手柄全断开/WebUI pkill),退避只针对崩溃循环。
     # 注意:清零分支不能落到下面的取模检查——N=0 时 N%%10==0 恒真,每次干净退出

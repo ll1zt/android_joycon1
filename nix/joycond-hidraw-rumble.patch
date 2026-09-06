@@ -28,10 +28,10 @@ index b480d59..bc39250 100644
  #endif
 diff --git a/include/rumble_hidraw.h b/include/rumble_hidraw.h
 new file mode 100644
-index 0000000..fa92629
+index 0000000..c3d1298
 --- /dev/null
 +++ b/include/rumble_hidraw.h
-@@ -0,0 +1,45 @@
+@@ -0,0 +1,48 @@
 +#ifndef JOYCOND_RUMBLE_HIDRAW_H
 +#define JOYCOND_RUMBLE_HIDRAW_H
 +
@@ -66,12 +66,15 @@ index 0000000..fa92629
 +    public:
 +        rumble_hidraw();
 +        ~rumble_hidraw();
-+        /* devpath 形如 /class/input/eventX;返回是否成功打开 hidraw */
++        /* devpath 来自 Android 检测器，形如 /class/input/eventX/device（结尾带 /device）。
++         * 所以 glob 是 .../eventX/device/device/hidraw/hidraw* —— 两个 device 不是笔误：
++         * 第一个是 input 设备的父链，第二个才落到 HID 设备。改之前先读 HANDOFF.md §3
++         * 返回是否成功打开 hidraw */
 +        bool open_for(const std::string &devpath, bool is_left);
 +        bool is_open() const { return fd >= 0; }
 +        /* strong/weak: FF_RUMBLE 的 0..0xFFFF 幅度,映射到 LF/HF 频段 */
 +        void send(unsigned short strong, unsigned short weak);
-+        /* 发中性值停震 */
++        /* 停震：连发 5 个中性包（对齐内核 JC_RUMBLE_ZERO_AMP_PKT_CNT，抗 BT 丢包） */
 +        void stop();
 +        void close();
 +};
@@ -100,21 +103,6 @@ index f8c85a3..983fdf6 100644
          std::string left_mac;
          std::string right_mac;
  
-diff --git a/src/ctlr_detector_android.cpp b/src/ctlr_detector_android.cpp
-index 6997557..f89dcc9 100644
---- a/src/ctlr_detector_android.cpp
-+++ b/src/ctlr_detector_android.cpp
-@@ -10,9 +10,9 @@
- #include <fcntl.h>
- #include <unistd.h>
- #include <dirent.h>
-+#include <libgen.h>
- #include <linux/types.h>
- #include <linux/netlink.h>
--#include <netlink/msg.h>
- #include <libevdev/libevdev.h>
- 
- //private
 diff --git a/src/main.cpp b/src/main.cpp
 index c43a5a9..e0f44e1 100644
 --- a/src/main.cpp
@@ -147,7 +135,7 @@ index c43a5a9..e0f44e1 100644
      ctlr_mgr ctlr_manager(epoll_manager);
  #if defined(ANDROID) || defined(__ANDROID__)
 diff --git a/src/phys_ctlr.cpp b/src/phys_ctlr.cpp
-index 8d0e4a8..e4bd180 100644
+index 8d0e4a8..7867767 100644
 --- a/src/phys_ctlr.cpp
 +++ b/src/phys_ctlr.cpp
 @@ -306,6 +306,14 @@ phys_ctlr::phys_ctlr(std::string const &devpath, std::string const &devname) :
@@ -160,30 +148,34 @@ index 8d0e4a8..e4bd180 100644
 +        enum Model m = get_model();
 +        bool left = (m == Model::Left_Joycon || m == Model::Procon);
 +        if (rumble.open_for(devpath, left))
-+            std::cout << "rumble hidraw opened for " << devpath << " left=" << left << std::endl;
++            std::cerr << "rumble hidraw opened for " << devpath << " left=" << left << std::endl;
 +    }
  }
  
  phys_ctlr::~phys_ctlr()
 diff --git a/src/rumble_hidraw.cpp b/src/rumble_hidraw.cpp
 new file mode 100644
-index 0000000..2c14300
+index 0000000..4bd7012
 --- /dev/null
 +++ b/src/rumble_hidraw.cpp
-@@ -0,0 +1,146 @@
+@@ -0,0 +1,166 @@
 +#include "rumble_hidraw.h"
 +#include "rumble_scale.h"
 +
 +#include <glob.h>
 +#include <string.h>
++#include <errno.h>
 +#include <fcntl.h>
 +#include <unistd.h>
 +#include <time.h>
 +#include <iostream>
 +
-+// HF 频段选点:freq byte 0x04 起步(81.75Hz),步进 +0x04;0x20 ≈ 160Hz 附近
++// HF 频段选点。频率字节是 12bit 编码的低 8bit(高 4bit 挤在幅度字节高位)，
++// 0x04 = 81.75Hz 起步、步进 +4。对照内核 hid-nintendo 自己的频率表:
++//   0x20 -> 95Hz, 0x40 -> 160Hz, 0x80 -> 320Hz(内核默认 HF 选 320Hz)
 +#define HF_FREQ_DEFAULT 0x20
-+// LF 频段选点:0x01(40.87Hz) - 0x7F(626Hz);普通震动的厚实感取 ~80Hz
++// LF 频段选点:0x01 = 40.87Hz … 0x7F = 626Hz。内核表:0x14 -> 62Hz, 0x20 -> 80Hz。
++// 62Hz 贴近 Joy-Con LRA 谐振点，比内核默认的 160Hz 更响但更"闷"。
 +#define LF_FREQ_DEFAULT 0x14
 +// LF 幅度编码:0x40 = 0.0f,0x72 = 1.0f(安全上限,文档明确警告超限伤 LRA)
 +#define LF_AMP_OFF   0x40
@@ -195,6 +187,10 @@ index 0000000..2c14300
 +static const unsigned char NEUTRAL[4] = { 0x00, 0x01, 0x40, 0x40 };
 +// 同参数最小重发间隔(ms),防止 play 风暴打爆蓝牙链路(0x30 报告仍在 60Hz 抢带宽)
 +#define MIN_INTERVAL_MS 10
++// 停震中性包连发次数。BT HID 的 output report 会丢，只发一个中性包
++// 可能永远收不到 -> 手柄一直震。内核驱动同样连发 5 个
++// (JC_RUMBLE_ZERO_AMP_PKT_CNT)，这里保持一致。
++#define STOP_PKT_CNT 5
 +
 +static unsigned long now_ms()
 +{
@@ -308,40 +304,103 @@ index 0000000..2c14300
 +                HF_AMP_OFF + (unsigned)weak * (HF_AMP_MAX - HF_AMP_OFF) / 0xFFFF,
 +                LF_FREQ_DEFAULT,
 +                LF_AMP_OFF + (unsigned)strong * (LF_AMP_MAX - LF_AMP_OFF) / 0xFFFF);
-+    write_report(band, is_left);
++    if (write_report(band, is_left) < 0) {
++        // ENODEV = 手柄已断开/节点已失效；关 fd，等 phys_ctlr 重建时重开，
++        // 避免对着死节点持续 write + 刷日志
++        if (errno == ENODEV || errno == EPIPE) {
++            std::cerr << "rumble_hidraw: device gone, closing fd\n";
++            close();
++        } else {
++            std::cerr << "rumble_hidraw: write failed: " << strerror(errno) << "\n";
++        }
++    }
 +}
 +
 +void rumble_hidraw::stop()
 +{
 +    if (fd < 0)
 +        return;
-+    write_report(NEUTRAL, is_left);
++    // 连发多个中性包：单个包丢失会让手柄持续震动(内核驱动同样连发 5 个)
++    for (int i = 0; i < STOP_PKT_CNT; i++)
++        write_report(NEUTRAL, is_left);
++    last_send_ms = 0;   // 停震后允许下一个 play 立即生效，不被前沿节流吞掉
 +}
 diff --git a/src/virt_ctlr_combined.cpp b/src/virt_ctlr_combined.cpp
-index ce5ea9a..68e3f5f 100644
+index ce5ea9a..5d9c864 100644
 --- a/src/virt_ctlr_combined.cpp
 +++ b/src/virt_ctlr_combined.cpp
-@@ -1,4 +1,5 @@
+@@ -1,6 +1,8 @@
  #include "virt_ctlr_combined.h"
 +#include <map>
  
  #include <cstring>
++#include <ctime>
  #include <fcntl.h>
-@@ -111,6 +112,23 @@ void virt_ctlr_combined::handle_uinput_event()
+ #include <iostream>
+ #include <libevdev/libevdev-uinput.h>
+@@ -82,6 +84,14 @@ void virt_ctlr_combined::relay_events(std::shared_ptr<phys_ctlr> phys)
+     }
+ }
+ 
++/* 日志限流用的单调毫秒时钟（与 rumble_hidraw 内部同名逻辑独立，避免跨 TU 依赖） */
++static unsigned long ff_now_ms()
++{
++    struct timespec ts;
++    clock_gettime(CLOCK_MONOTONIC, &ts);
++    return ts.tv_sec * 1000UL + ts.tv_nsec / 1000000UL;
++}
++
+ void virt_ctlr_combined::handle_uinput_event()
+ {
+     struct input_event ev;
+@@ -91,11 +101,23 @@ void virt_ctlr_combined::handle_uinput_event()
+         switch (ev.type) {
+             case EV_FF:
+                 {
++                    /* FF_GAIN / FF_AUTOCENTER 的 value 是 0..0xFFFF 的量值，不是 0/1
++                     * 播放开关；uinput 用 dev->event 覆盖了 input_ff_event，内核 ff core
++                     * 对注入的 EV_FF 不做任何 id 校验，所以这里必须自己挡掉野 code。 */
++                    if (ev.code >= FF_GAIN)
++                        break;
++
+                     struct input_event redirectedl = ev;
+                     struct input_event redirectedr = ev;
+ 
++                    /* hidraw 模式下物理上传失败，rumble_effects 永远为空（我们不再用 -1
++                     * 脏 key 去污染它），所以上游那句 "is not in map" 会对每一次正常播放
++                     * 都报错——必须同受 hidraw 守卫，否则日志被刷爆。 */
++                    bool hidraw_serving = (physl && physl->get_rumble().is_open()) ||
++                                          (physr && physr->get_rumble().is_open());
++
+                     if (!rumble_effects.count(ev.code)) {
+-                        if (ev.code < FF_GAIN)
++                        if (ev.code < FF_GAIN && !hidraw_serving)
+                             std::cerr << "ERROR: ff_effect with id=" << ev.code << " is not in map\n";
+                     } else {
+                         redirectedl.code = rumble_effects[ev.code].first.id;
+@@ -111,6 +133,31 @@ void virt_ctlr_combined::handle_uinput_event()
                          if (write(physr->get_fd(), &redirectedr, sizeof(redirectedr)) != sizeof(redirectedr))
                              std::cerr << "Failed to forward EV_FF to physr\n";
                      }
 +
 +                    // hidraw 直通(CONFIG_NINTENDO_FF 关闭时内核不下发,由本进程直接写 0x10)
-+                    if (ev.value == 1) {
-+                        auto mag = std::make_pair((unsigned short)0xC000, (unsigned short)0xC000);
-+                        auto it = rumble_magnitudes.find(ev.code);
-+                        if (it != rumble_magnitudes.end())
-+                            mag = it->second;
++                    /* 幅度只认 UI_FF_UPLOAD 时记下的虚拟 id；查不到就丢弃，
++                     * 绝不能用默认值兜底——那会让任何野 id 都震一下，且抹掉 strong/weak 语义。 */
++                    auto mag_it = rumble_magnitudes.find(ev.code);
++                    if (mag_it == rumble_magnitudes.end()) {
++                        /* 同样限流：野 id 可能来自不守规矩的客户端，不能让它刷日志 */
++                        static unsigned long dropped_last_ms = 0;
++                        unsigned long now = ff_now_ms();
++                        if (now - dropped_last_ms >= 1000) {
++                            dropped_last_ms = now;
++                            std::cerr << "hidraw rumble: no magnitude recorded for effect id "
++                                      << ev.code << ", dropped\n";
++                        }
++                    } else if (ev.value) {
 +                        if (physl && physl->get_rumble().is_open())
-+                            physl->get_rumble().send(mag.first, mag.second);
++                            physl->get_rumble().send(mag_it->second.first, mag_it->second.second);
 +                        if (physr && physr->get_rumble().is_open())
-+                            physr->get_rumble().send(mag.first, mag.second);
++                            physr->get_rumble().send(mag_it->second.first, mag_it->second.second);
 +                    } else {
 +                        if (physl && physl->get_rumble().is_open())
 +                            physl->get_rumble().stop();
@@ -351,7 +410,7 @@ index ce5ea9a..68e3f5f 100644
                      break;
                  }
  
-@@ -129,6 +147,12 @@ void virt_ctlr_combined::handle_uinput_event()
+@@ -129,6 +176,12 @@ void virt_ctlr_combined::handle_uinput_event()
                                  std::cerr << "Failed to get uinput_ff_upload: " << strerror(errno) << std::endl;
  
                              effect = upload.effect;
@@ -364,3 +423,65 @@ index ce5ea9a..68e3f5f 100644
                              /* Check if already allocated or it needs an update */
                              allocate_new_effect = !rumble_effects.count(effect.id);
                              if (allocate_new_effect)
+@@ -155,10 +208,30 @@ void virt_ctlr_combined::handle_uinput_event()
+ 
+                             upload.effect = effect;
+ 
+-                            if (upload.retval)
++                            /* GKI 的 hid-nintendo 没编 CONFIG_NINTENDO_FF，物理设备 EVIOCSFF
++                             * 必然 ENOSYS。但震动由本进程经 hidraw 代发时，这个失败绝不能回传：
++                             * uinput 把 upload.retval 原样当作 syscall 返回值，正数 errno 会被
++                             * 应用层当成"成功"(ioctl 返回 38 而非 -1)，而 Android EventHub 判
++                             * 非零即失败并直接放弃震动 —— 游戏内震动链就是这么断掉的。 */
++                            bool hidraw_ok = (physl && physl->get_rumble().is_open()) ||
++                                             (physr && physr->get_rumble().is_open());
++                            if (upload.retval && hidraw_ok) {
++                                /* 只在首次报：Android EventHub 每次 vibrate() 都会重传 effect，
++                                 * 这是热路径，每次都打日志会把 joycond.log 刷爆 */
++                                static bool warned_ff_dead = false;
++                                if (!warned_ff_dead) {
++                                    warned_ff_dead = true;
++                                    std::cerr << "UI_FF_UPLOAD: kernel FF unavailable ("
++                                              << strerror(upload.retval)
++                                              << "), serving rumble via hidraw\n";
++                                }
++                                upload.retval = 0;
++                            } else if (upload.retval) {
+                                 std::cerr << "UI_FF_UPLOAD failed: " << strerror(upload.retval) << std::endl;
++                            }
+ 
+-                            if (allocate_new_effect)
++                            /* 物理上传失败时 effect.id 仍是 -1，塞进 map 会污染热插拔重传 */
++                            if (allocate_new_effect && effect.id >= 0)
+                                 rumble_effects[effect.id] = std::make_pair(effect_l, effect_r);
+ 
+                             if (ioctl(get_uinput_fd(), UI_END_FF_UPLOAD, &upload))
+@@ -184,12 +257,25 @@ void virt_ctlr_combined::handle_uinput_event()
+                                     erase.retval = errno;
+                             }
+ 
++                            /* 同 UI_FF_UPLOAD：物理侧 EVIOCRMFF 的 ENOSYS 不能回传，
++                             * 否则 ioctl(EVIOCRMFF) 返回正数 38，应用侧擦除失败。 */
++                            bool hidraw_ok = (physl && physl->get_rumble().is_open()) ||
++                                             (physr && physr->get_rumble().is_open());
++                            if (erase.retval && hidraw_ok)
++                                erase.retval = 0;
++
++                            /* 幅度表按虚拟 id 记账，与物理擦除是否成功无关，必须清掉防泄漏 */
++                            rumble_magnitudes.erase(erase.effect_id);
++
+                             if (erase.retval)
+                                 std::cerr << "UI_FF_ERASE failed: " << strerror(erase.retval) << std::endl;
+-                            else if (!rumble_effects.count(erase.effect_id))
+-                                std::cerr << "WARNING: effect_id not in rumble_effects map\n";
+-                            else
++                            else if (!rumble_effects.count(erase.effect_id)) {
++                                /* hidraw 模式下根本不会往 rumble_effects 里写，不是异常 */
++                                if (!hidraw_ok)
++                                    std::cerr << "WARNING: effect_id not in rumble_effects map\n";
++                            } else {
+                                 rumble_effects.erase(erase.effect_id);
++                            }
+ 
+                             if (ioctl(get_uinput_fd(), UI_END_FF_ERASE, &erase))
+                                 std::cerr << "Failed to end uinput_ff_erase: " << strerror(errno) << std::endl;

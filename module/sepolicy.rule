@@ -3,6 +3,9 @@
 allow ksu input_device dir { search read open getattr }
 allow ksu input_device chr_file { getattr read write ioctl setattr }
 allow ksu uhid_device chr_file { getattr read write ioctl }
+# hidraw 直通震动：/dev/hidrawN 标签是 hidraw_device（AOSP private/file_contexts），
+# LineageOS 的 joycond.te 没有这条——它不走 hidraw。缺了它，域一旦收紧震动先死。
+allow ksu hidraw_device chr_file { getattr read write open ioctl }
 allow ksu self netlink_kobject_uevent_socket { create bind read write getopt setopt }
 allow ksu sysfs dir { search read open getattr }
 allow ksu sysfs file { read open getattr }

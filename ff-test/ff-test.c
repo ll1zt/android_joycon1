@@ -55,9 +55,11 @@ int main(int argc, char **argv) {
         argi = 2;  /* 显式给了节点,数值参数从 argv[2] 起 */
     }
     const char *path = argi == 2 ? argv[1] : autop;
-    int duration = argc > argi + 1 ? atoi(argv[argi]) : 300;
-    unsigned short strong = argc > argi + 2 ? (unsigned short)strtol(argv[argi+1], NULL, 0) : 0xc000;
-    unsigned short weak   = argc > argi + 3 ? (unsigned short)strtol(argv[argi+2], NULL, 0) : 0xc000;
+    /* 读 argv[i] 的条件是 argc > i，不是 argc > i+1（旧写法每个都多要求一个
+       参数，导致最后一个参数永远读不到、静默掉回默认值） */
+    int duration = argc > argi     ? atoi(argv[argi])         : 300;
+    unsigned short strong = argc > argi + 1 ? (unsigned short)strtol(argv[argi+1], NULL, 0) : 0xc000;
+    unsigned short weak   = argc > argi + 2 ? (unsigned short)strtol(argv[argi+2], NULL, 0) : 0xc000;
 
     int fd = open(path, O_RDWR);
     if (fd < 0) { fprintf(stderr, "open %s: %s\n", path, strerror(errno)); return 1; }
@@ -78,8 +80,17 @@ int main(int argc, char **argv) {
     effect.u.rumble.strong_magnitude = strong; // LF 马达
     effect.u.rumble.weak_magnitude = weak;     // HF 马达
 
-    if (ioctl(fd, EVIOCSFF, &effect) == -1) {
-        fprintf(stderr, "EVIOCSFF: %s\n", strerror(errno)); return 1;
+    /* 注意：内核会把 joycond 回传的 errno 当作 syscall 的**正数返回值**泄漏出来
+       （ioctl 返回 38 而不是 -1），所以必须判 != 0，不能只判 == -1。 */
+    int rc = ioctl(fd, EVIOCSFF, &effect);
+    if (rc != 0) {
+        fprintf(stderr, "EVIOCSFF 返回 %d (%s)\n", rc, strerror(rc > 0 ? rc : errno));
+        return 1;
+    }
+    if (effect.id < 0) {
+        fprintf(stderr, "内核未回写 effect id (id=%d)：FF 上传链断了，震动不会按幅度执行\n",
+                effect.id);
+        return 1;
     }
     printf("effect id=%d 已上传 (len=%dms strong=0x%04x weak=0x%04x)\n",
            effect.id, duration, strong, weak);
@@ -99,8 +110,11 @@ int main(int argc, char **argv) {
     // 停止并清除
     play.value = 0;
     gettimeofday(&play.time, NULL);
-    write(fd, &play, sizeof(play));
-    ioctl(fd, EVIOCRMFF, effect.id);
+    if (write(fd, &play, sizeof(play)) != sizeof(play))
+        fprintf(stderr, "write(EV_FF stop): %s\n", strerror(errno));
+    int rc2 = ioctl(fd, EVIOCRMFF, effect.id);
+    if (rc2 != 0)
+        fprintf(stderr, "EVIOCRMFF 返回 %d (%s)\n", rc2, strerror(rc2 > 0 ? rc2 : errno));
     printf("完成\n");
     close(fd);
     return 0;

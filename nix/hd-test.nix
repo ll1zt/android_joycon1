@@ -17,10 +17,12 @@ stdenvNoCC.mkDerivation {
   };
 
   # 必须用 clang++:靠扩展名识别虽能编过,但链接阶段不带 C++ 运行时,
-  # 一旦引入 iostream/std::string 就会链接失败
+  # 一旦引入 iostream/std::string 就会链接失败。
+  # -static-libstdc++ 必须带上:clang++ 默认动态链 libc++_shared.so,
+  # 设备上没有这个 NDK 运行库,二进制直接 CANNOT LINK(v1.2.1 真机踩过)
   buildPhase = ''
     runHook preBuild
-    ${llvm}/bin/${target}-clang++ -O2 -o hd-test hd-test.cpp -lm
+    ${llvm}/bin/${target}-clang++ -O2 -static-libstdc++ -o hd-test hd-test.cpp -lm
     runHook postBuild
   '';
 

@@ -34,7 +34,7 @@
 |---|---|
 | 内核 `hid-nintendo` | 唯一说 Joy-Con 私有协议的组件(subcommand、0x30 全量报告、校准、IMU),GKI 内置。 |
 | joycond | 单只 Joy-Con 只有半副手柄。joycond 独占两只、合并输入,创建 App 看到的 `0x2008` 合成设备;它的 Android 检测器走 netlink uevent(Android 没有 udev)。 |
-| uinput FF 钩子 → hidraw | GKI 编译驱动时没开 `CONFIG_NINTENDO_FF`,物理手柄上 FF 接口根本没被注册(连 `EV_FF` capability 都没有),内核路径永远发不出震动。补丁在 joycond 内截获效果(它本来就要经 `UI_BEGIN_FF_UPLOAD` 处理),直接写 `0x10` 震动报告到手柄 hidraw。 |
+| uinput FF 钩子 → hidraw | GKI 编译驱动时没开 `CONFIG_NINTENDO_FF`,物理手柄上 FF 接口根本没被注册(连 `EV_FF` capability 都没有),内核路径永远发不出震动。补丁在 joycond 内截获效果(它本来就要经 `UI_BEGIN_FF_UPLOAD` 处理),直接写 `0x10` 震动报告到手柄 hidraw。v1.3.0 起长效果(≥120ms)走 60Hz 包络流——攻击渐起、恒定段零帧(LRA 保持幅度)、衰减渐降、中性包收尾;并做幅度→频率联动;均可用 `--envelope` 关闭。 |
 | keylayout `Vendor_057e_Product_2008.kl` | 把合成设备的 evdev 键码/轴映射为 Android `KEYCODE_BUTTON_*` / `MotionEvent.AXIS_*`。没有它轴会被标成 `GENERIC_*`,游戏直接无视设备。 |
 | idc 文件 | `2006/2007: device.disabled=1` 让框架不为半截手柄生成 Mapper(Android 16 实测:设备仍留在 InputReader 列表并占用 ControllerNumber,不可用但未真正移除);`2008: device.internal=0` 标记合成设备为外接手柄。 |
 | service.sh | 开机放置:二进制 → `/dev` tmpfs(可 exec),keylayout/idc → `/data/system/devices/{keylayout,idc}`(EventHub 搜索链末位,无挂载;失败即回退 Generic.kl,无遮蔽风险),然后以退避策略守护进程并把日志落到 `/data/adb/joycond.log`。 |
@@ -57,6 +57,13 @@ LRA),HF 幅度 `0x01 = 0.0f … 0xC8 = 1.0f`。频率覆盖 LF 40.87–626.28Hz�
 HF 81.75–1252.57Hz。单只手柄的单个 LRA 可以同时驱动两个频段,帧可以按最高
 60Hz 流式下发——Switch 游戏的"HD 震动"质感(滚珠、雨滴、引擎轰鸣)正是这样
 产生的。`hd-test` 用 4 段循环波形演示了这套能力。
+
+幅度映射与发射管线(v1.3):输入幅度先经内核 `joycon_rumble_amplitudes` 感知表查表
+(0..1003 线性域,最近区间);HD 处理开启时,长效果(≥120ms)由 60Hz timerfd 驱动
+包络流——攻击 32ms 渐起(首帧 50%)、恒定段零帧(LRA 保持最后幅度,零带宽)、
+衰减尾部(时长 1/3,≤300ms)渐降、中性包 5 连发收尾;幅度同时联动频率
+(LF 62→87Hz、HF 95→124Hz)。短效果(<120ms)保持单帧满幅——短咔嗒需要冲劲。
+所有 HD 处理可用 `--envelope` 一键关闭(回退 v1.2.x 单帧行为)。
 
 ## 构建架构(Nix flakes)
 

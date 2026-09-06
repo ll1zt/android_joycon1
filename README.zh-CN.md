@@ -50,7 +50,9 @@ BT HID (uhid)                内核 hid-nintendo(GKI 内置 =y)      /dev/input 
    (grab)两只物理手柄、合成 uinput 设备;它自带 Android 检测器(netlink uevent,
    不需要 udev)。本项目给它打了补丁:截获游戏上传的 FF 效果,改经 **hidraw 直接写
    `0x10` 震动报告**(HF+LF 双频带,最高 60Hz 流式——HD Rumble 的全部能力),同时把
-   LF 幅度钳制在安全上限 `0x72` 以内。
+   LF 幅度钳制在安全上限 `0x72` 以内;按内核感知表做幅度映射,长震动走 **60Hz 包络
+   流**(渐起/渐收,恒定段零帧零带宽)并做幅度→频率联动——普通游戏的震动也有 HD
+   质感(WebUI 可开关)。
 3. **框架层**:keylayout(`Vendor_057e_Product_2008.kl`,LineageOS 2025 版,含 HAT
    轴 + 模拟扳机)与 idc 文件由模块的 `service.sh` 直接写入
    `/data/system/devices/{keylayout,idc}`——AOSP EventHub 搜索链的**末位**
@@ -67,8 +69,8 @@ BT HID (uhid)                内核 hid-nintendo(GKI 内置 =y)      /dev/input 
 | 全系统级合成:所有 App 只见一只完整手柄 | ✅ |
 | 双摇杆(全量程+校准)、ABXY、十字键→HAT、L/R、ZL/ZR→模拟扳机、SL/SR、±、Home、Capture | ✅ |
 | 单只手柄对框架不可用(idc `device.disabled=1` 不生成 Mapper) | ✅(Android 16 实测:设备仍留在 InputReader 列表并占用 ControllerNumber,不可用但并非真正移除) |
-| 普通震动(strong→LF 低频带、weak→HF 高频带) | ✅ hidraw 直通(2026-09-06 GamePad Tester 游戏内 + ff-test 幅度四连测验证) |
-| **HD Rumble 级流式波形**(60Hz、双频带独立幅度/频率控制) | ✅ `hd-test` |
+| 普通震动(strong→LF 低频带、weak→HF 高频带) | ✅ hidraw 直通 + 内核对数幅度表(2026-09-06 GamePad Tester 游戏内 + ff-test 幅度四连测验证) |
+| **HD Rumble 级流式波形**(60Hz、双频带独立幅度/频率控制) | ✅ `hd-test`;v1.3.0 起游戏内长震动同样走包络流(渐起/渐收+频率联动,WebUI 可关) |
 | 休眠自动重连(~5 分钟息睡),按 MAC 重绑 | ✅ joycond 处理 |
 | 电量 | ✅ 内核有(`capacity_level`),框架无 UI(经典 C 类断点) |
 | 体感 IMU | ❌ 内核有数据,joycond 合成时丢弃,安卓框架无通路(结构性) |
@@ -96,6 +98,8 @@ adb push -a "$(readlink -f result)" /sdcard/Download/joycond.zip
 ```
 
 然后:**KernelSU App → 模块 → 从本地存储安装 → 选 zip → 重启**。
+模块自带 **KernelSU WebUI 面板**(管理器 → 模块 → joycond → WebUI):连接状态、
+震动测试、HD 演示、总强度、ABXY 布局与 HD 包络开关。
 卸载模块时会自动执行 `uninstall.sh`,清理写入 `/data/system/devices` 的持久文件
 (挂载方案无需此步,/data 文件是持久的)。注意**「禁用」不等于「卸载」**:禁用状态下
 模块脚本不会执行、`uninstall.sh` 也不会跑,`/data/system/devices` 的文件会残留
@@ -138,7 +142,8 @@ adb shell su -c '/data/local/tmp/hd-test /dev/hidraw0 /dev/hidraw1'
 │   └── hd-test.nix         # HD 震动波形播放器
 ├── module/                 # module.prop、service.sh(放置 .kl/.idc)、uninstall.sh
 │   ├── keylayout/          #   Vendor_057e_Product_2008.kl(LineageOS 2025 版)
-│   └── idc/                #   2006/2007 禁用单只、2008 标记外接
+│   ├── idc/                #   2006/2007 禁用单只、2008 标记外接
+│   └── webroot/            #   KernelSU WebUI 面板(状态/震动测试/HD 演示/强度/ABXY/HD 包络)
 ├── ff-test/、hd-test/      # 测试工具源码(ff-test:已死的内核 FF 路径验证;hd-test:HD 震动演示)
 ├── refs/                   # 上游克隆(gitignore):joycond、LineageOS HAL、dekuNukem 文档
 ├── precheck/               # 预检脚本

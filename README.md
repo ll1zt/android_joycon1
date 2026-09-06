@@ -56,6 +56,10 @@ Three layers had to cooperate (each with real pitfalls):
    already has an Android detector (netlink uevent, no udev). This project patches it
    to also **drive rumble directly via hidraw** (`0x10` reports, HF+LF bands,
    60Hz streaming — full HD-Rumble capability), bypassing the dead kernel FF path.
+   Amplitudes follow the kernel's perceptual table; long vibrations stream a
+   **60Hz envelope** (soft attack/decay, zero frames in the constant phase) with
+   amplitude→frequency coupling, so ordinary game rumble gains HD texture
+   (toggle in the WebUI).
 3. **Framework**: a keylayout (`Vendor_057e_Product_2008.kl`, LineageOS version with
    HAT axes + analog triggers) and idc files are placed by the module's `service.sh`
    directly into `/data/system/devices/{keylayout,idc}` — the **tail** of the AOSP
@@ -73,8 +77,8 @@ Three layers had to cooperate (each with real pitfalls):
 | Combined single gamepad for **all** apps (system-wide) | ✅ |
 | Sticks (full range, calibrated), ABXY, D-pad→HAT, L/R, ZL/ZR→analog triggers, SL/SR, +/-, Home, Capture | ✅ |
 | Individual Joy-Cons unusable (`device.disabled=1` idc: no input mappers) | ✅ (on Android 16 they still appear in the InputReader device list and consume ControllerNumbers — unusable, but not truly hidden) |
-| Rumble (classic dual-motor semantics: strong→LF band, weak→HF band) | ✅ via hidraw (verified in-game via GamePad Tester + ff-test magnitude sweep, 2026-09-06) |
-| **HD-Rumble-style streaming waveforms** (60Hz, per-band amplitude/frequency control) | ✅ via hidraw (`hd-test`) |
+| Rumble (classic dual-motor semantics: strong→LF band, weak→HF band) | ✅ via hidraw + kernel perceptual table (verified in-game via GamePad Tester + ff-test magnitude sweep, 2026-09-06) |
+| **HD-Rumble-style streaming waveforms** (60Hz, per-band amplitude/frequency control) | ✅ via hidraw (`hd-test`); since v1.3.0 in-game long vibrations stream an envelope too (WebUI toggle) |
 | Sleep / auto-reconnect (~5 min idle), MAC-based rebinding | ✅ handled by joycond |
 | Battery level | ✅ kernel (`capacity_level`), no framework UI |
 | IMU (motion) | ❌ kernel data exists; joycond drops it; Android framework has no path |
@@ -102,6 +106,8 @@ adb push -a "$(readlink -f result)" /sdcard/Download/joycond.zip
 ```
 
 Then: **KernelSU app → Modules → Install from storage → joycond.zip → reboot**.
+The module ships a **WebUI panel** (manager → module → joycond → WebUI): connection
+status, rumble test, HD demo, master scale, ABXY layout and the HD envelope toggle.
 Uninstalling the module automatically runs `uninstall.sh`, which cleans up the
 persistent files this module writes into `/data/system/devices` (unnecessary in the
 bind-mount era; /data files survive reboots). Note that **disabling** (not
@@ -149,7 +155,8 @@ adb shell su -c '/data/local/tmp/hd-test /dev/hidraw0 /dev/hidraw1'
 │   └── hd-test.nix         # HD rumble waveform player
 ├── module/                 # module.prop, service.sh (places .kl/.idc), uninstall.sh,
 │   ├── keylayout/          #   Vendor_057e_Product_2008.kl (LineageOS 2025)
-│   └── idc/                #   2006/2007 disabled, 2008 external
+│   ├── idc/                #   2006/2007 disabled, 2008 external
+│   └── webroot/            #   KernelSU WebUI panel (status/rumble test/HD demo/scale/ABXY/HD envelope)
 ├── ff-test/, hd-test/      # test tool sources (ff-test: legacy kernel-FF path; hd-test: HD rumble demo)
 ├── refs/                   # upstream clones (gitignored): joycond, LineageOS HAL, dekuNukem docs
 ├── precheck/               # pre-flight check scripts

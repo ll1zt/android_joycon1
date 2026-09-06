@@ -35,7 +35,7 @@ this project, and why each piece exists.
 |---|---|
 | kernel `hid-nintendo` | The only component that speaks Joy-Con's private protocol (subcommands, 0x30 full reports, calibration, IMU). Built into GKI. |
 | joycond | A single Joy-Con exposes half a gamepad. joycond grabs both, merges inputs and creates the `0x2008` combined uinput device that apps see. Its Android detector uses netlink uevents (no udev on Android). |
-| uinput FF hook → hidraw | GKI builds the driver without `CONFIG_NINTENDO_FF`: the physical pads never get an FF interface at all (both the `EV_FF` capability and the ff-core registration live inside that `#if`), so the kernel path can never transmit rumble. The patch intercepts effects in joycond (which must process them anyway via `UI_BEGIN_FF_UPLOAD`) and writes `0x10` rumble reports straight to the pads' hidraw nodes. |
+| uinput FF hook → hidraw | GKI builds the driver without `CONFIG_NINTENDO_FF`: the physical pads never get an FF interface at all (both the `EV_FF` capability and the ff-core registration live inside that `#if`), so the kernel path can never transmit rumble. The patch intercepts effects in joycond (which must process them anyway via `UI_BEGIN_FF_UPLOAD`) and writes `0x10` rumble reports straight to the pads' hidraw nodes. Since v1.3.0 long effects (>=120ms) stream a 60Hz envelope — soft attack, zero frames through the constant phase (the LRA holds its amplitude), linear decay, neutral burst to finish — plus amplitude→frequency coupling; everything toggles off via `--envelope`. |
 | keylayout `Vendor_057e_Product_2008.kl` | Maps the combined device's evdev codes/axes to Android `KEYCODE_BUTTON_*` / `MotionEvent.AXIS_*`. Without it Android labels axes `GENERIC_*` and games ignore the device. |
 | idc files | `2006/2007: device.disabled=1` leaves the half-controllers without input mappers (measured on Android 16: they still appear in the InputReader device list and consume ControllerNumbers — unusable, but not truly hidden); `2008: device.internal=0` marks the combined pad external. |
 | service.sh | Boot-time staging: binary → `/dev` tmpfs (exec), keylayout/idc → `/data/system/devices/{keylayout,idc}` (tail of the EventHub search path, no mounting; a missing file falls back to `Generic.kl` with no shadowing risk), then supervises the daemon with backoff and logs to `/data/adb/joycond.log`. |
@@ -60,6 +60,16 @@ Both bands of a pad's single LRA can be driven simultaneously, and frames can
 be streamed at up to 60 Hz — that is exactly how Switch games produce "HD
 rumble" textures (rolling marbles, rain, engine revs). `hd-test` demonstrates
 this with four looped waveforms.
+
+Amplitude mapping and the emit pipeline (v1.3): input amplitudes go through the
+kernel's `joycon_rumble_amplitudes` perceptual table (0..1003 linear domain,
+nearest interval). With HD processing enabled, long effects (>=120ms) are driven
+by a 60Hz timerfd envelope — 32ms attack ramp (first frame at 50%), zero frames
+through the constant phase (the LRA holds its last amplitude: zero bandwidth),
+linear decay over the final third (<=300ms), and a 5-packet neutral burst to
+finish; amplitude also couples into frequency (LF 62→87Hz, HF 95→124Hz). Short
+effects (<120ms) keep a single full-amplitude frame — clicks need the punch.
+All HD processing can be switched off with `--envelope` (exact v1.2.x behavior).
 
 ## Build architecture (Nix flakes)
 

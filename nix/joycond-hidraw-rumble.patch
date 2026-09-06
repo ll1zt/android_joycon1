@@ -466,10 +466,10 @@ index 0000000..7a93cdb
 +    last_send_ms = 0;   // 停震后允许下一个 play 立即生效,不被前沿节流吞掉
 +}
 diff --git a/src/virt_ctlr_combined.cpp b/src/virt_ctlr_combined.cpp
-index ce5ea9a..a5bbdf9 100644
+index ce5ea9a..e861e38 100644
 --- a/src/virt_ctlr_combined.cpp
 +++ b/src/virt_ctlr_combined.cpp
-@@ -1,7 +1,10 @@
+@@ -1,7 +1,17 @@
  #include "virt_ctlr_combined.h"
 +#include <map>
  
@@ -477,10 +477,17 @@ index ce5ea9a..a5bbdf9 100644
 +#include <ctime>
  #include <fcntl.h>
 +#include <sys/timerfd.h>
++
++#include "rumble_scale.h"
++
++// 包络参数:低于 120ms 不做包络(短咔嗒要冲劲);攻击 32ms=2 帧@60Hz
++#define ENVELOPE_MIN_MS 120
++#define ATTACK_MS 32
++#define ENVELOPE_TICK_MS 16
  #include <iostream>
  #include <libevdev/libevdev-uinput.h>
  #include <linux/uinput.h>
-@@ -82,6 +85,14 @@ void virt_ctlr_combined::relay_events(std::shared_ptr<phys_ctlr> phys)
+@@ -82,6 +92,14 @@ void virt_ctlr_combined::relay_events(std::shared_ptr<phys_ctlr> phys)
      }
  }
  
@@ -495,7 +502,7 @@ index ce5ea9a..a5bbdf9 100644
  void virt_ctlr_combined::handle_uinput_event()
  {
      struct input_event ev;
-@@ -91,11 +102,25 @@ void virt_ctlr_combined::handle_uinput_event()
+@@ -91,11 +109,25 @@ void virt_ctlr_combined::handle_uinput_event()
          switch (ev.type) {
              case EV_FF:
                  {
@@ -522,7 +529,7 @@ index ce5ea9a..a5bbdf9 100644
                              std::cerr << "ERROR: ff_effect with id=" << ev.code << " is not in map\n";
                      } else {
                          redirectedl.code = rumble_effects[ev.code].first.id;
-@@ -111,6 +136,53 @@ void virt_ctlr_combined::handle_uinput_event()
+@@ -111,6 +143,53 @@ void virt_ctlr_combined::handle_uinput_event()
                          if (write(physr->get_fd(), &redirectedr, sizeof(redirectedr)) != sizeof(redirectedr))
                              std::cerr << "Failed to forward EV_FF to physr\n";
                      }
@@ -576,7 +583,7 @@ index ce5ea9a..a5bbdf9 100644
                      break;
                  }
  
-@@ -129,6 +201,13 @@ void virt_ctlr_combined::handle_uinput_event()
+@@ -129,6 +208,13 @@ void virt_ctlr_combined::handle_uinput_event()
                                  std::cerr << "Failed to get uinput_ff_upload: " << strerror(errno) << std::endl;
  
                              effect = upload.effect;
@@ -590,7 +597,7 @@ index ce5ea9a..a5bbdf9 100644
                              /* Check if already allocated or it needs an update */
                              allocate_new_effect = !rumble_effects.count(effect.id);
                              if (allocate_new_effect)
-@@ -155,10 +234,29 @@ void virt_ctlr_combined::handle_uinput_event()
+@@ -155,10 +241,29 @@ void virt_ctlr_combined::handle_uinput_event()
  
                              upload.effect = effect;
  
@@ -622,7 +629,7 @@ index ce5ea9a..a5bbdf9 100644
                                  rumble_effects[effect.id] = std::make_pair(effect_l, effect_r);
  
                              if (ioctl(get_uinput_fd(), UI_END_FF_UPLOAD, &upload))
-@@ -184,12 +282,24 @@ void virt_ctlr_combined::handle_uinput_event()
+@@ -184,12 +289,24 @@ void virt_ctlr_combined::handle_uinput_event()
                                      erase.retval = errno;
                              }
  
@@ -650,7 +657,7 @@ index ce5ea9a..a5bbdf9 100644
  
                              if (ioctl(get_uinput_fd(), UI_END_FF_ERASE, &erase))
                                  std::cerr << "Failed to end uinput_ff_erase: " << strerror(errno) << std::endl;
-@@ -340,15 +450,165 @@ virt_ctlr_combined::virt_ctlr_combined(std::shared_ptr<phys_ctlr> physl, std::sh
+@@ -340,15 +457,160 @@ virt_ctlr_combined::virt_ctlr_combined(std::shared_ptr<phys_ctlr> physl, std::sh
      int flags = fcntl(get_uinput_fd(), F_GETFL, 0);
      fcntl(get_uinput_fd(), F_SETFL, flags | O_NONBLOCK);
  
@@ -752,11 +759,6 @@ index ce5ea9a..a5bbdf9 100644
 +            (unsigned)rumble_stream.weak * f / 0xFFFF);
 +}
 +
-+// 包络参数:低于 120ms 不做包络(短咔嗒要冲劲);攻击 32ms=2 帧@60Hz
-+#define ENVELOPE_MIN_MS 120
-+#define ATTACK_MS 32
-+#define ENVELOPE_TICK_MS 16
-+
 +/* 被移除手柄的残留状态清零(键全部释放、轴回中),映射与 relay_events 一致 */
 +void virt_ctlr_combined::clear_phys_state(std::shared_ptr<phys_ctlr> phys)
 +{
@@ -817,7 +819,7 @@ index ce5ea9a..a5bbdf9 100644
      libevdev_uinput_destroy(uidev);
      close(uifd);
      libevdev_free(virt_evdev);
-@@ -362,6 +622,8 @@ void virt_ctlr_combined::handle_events(int fd)
+@@ -362,6 +624,8 @@ void virt_ctlr_combined::handle_events(int fd)
          relay_events(physr);
      else if (fd == get_uinput_fd())
          handle_uinput_event();
@@ -826,7 +828,7 @@ index ce5ea9a..a5bbdf9 100644
      else
          std::cerr << "fd=" << fd << " is an invalid fd for this combined controller\n";
  }
-@@ -399,6 +661,8 @@ int virt_ctlr_combined::get_uinput_fd()
+@@ -399,6 +663,8 @@ int virt_ctlr_combined::get_uinput_fd()
  
  void virt_ctlr_combined::remove_phys_ctlr(const std::shared_ptr<phys_ctlr> phys)
  {

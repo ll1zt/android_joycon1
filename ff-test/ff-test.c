@@ -61,6 +61,13 @@ int main(int argc, char **argv) {
     int duration = argc > argi     ? atoi(argv[argi])         : 300;
     unsigned short strong = argc > argi + 1 ? (unsigned short)strtol(argv[argi+1], NULL, 0) : 0xc000;
     unsigned short weak   = argc > argi + 2 ? (unsigned short)strtol(argv[argi+2], NULL, 0) : 0xc000;
+    /* --no-stop: 触发后立即退出,效果留在设备上。用于验证 joycond 的 replay
+       自动停——uinput 旁路了内核定时器,没人 stop 就该由 joycond 兜底 */
+    int no_stop = 0;
+    for (int i = argi; i < argc; i++) {
+        if (strcmp(argv[i], "--no-stop") == 0)
+            no_stop = 1;
+    }
 
     int fd = open(path, O_RDWR);
     if (fd < 0) { fprintf(stderr, "open %s: %s\n", path, strerror(errno)); return 1; }
@@ -106,6 +113,12 @@ int main(int argc, char **argv) {
         fprintf(stderr, "write EV_FF: %s\n", strerror(errno)); return 1;
     }
     printf("已触发,等 %dms\n", duration);
+    if (no_stop) {
+        printf("no-stop 模式:立即退出,效果留在设备上;\n"
+               "若 joycond 自动停生效,手柄应在约 %dms 后自行停止\n", duration);
+        close(fd);
+        return 0;
+    }
     usleep(duration * 1000 + 200 * 1000);
 
     // 停止并清除

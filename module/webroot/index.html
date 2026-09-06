@@ -125,6 +125,7 @@ async function refresh(){
 async function saveScale(){
   const v = (parseInt(document.getElementById("scale").value)/100).toFixed(2);
   await sh("sed -i 's/\"rumble_scale\": *[0-9.]*/\"rumble_scale\": "+v+"/' /data/adb/modules/joycond/config.json");
+  await sh("/dev/.joycond-bin/ff-test 10 0 0"); // 先兜一发停震:被 kill 的 joycond 发不出中性包
   await sh("pkill joycond");   // service.sh 会自动带新参数拉起
   alert("已应用:"+v+"(守护进程自动重启)");
 }
@@ -132,6 +133,7 @@ async function saveScale(){
 async function saveAbxy(v){
   await sh("sed -i 's/\"abxy\": *\"[a-z]*\"/\"abxy\": \""+v+"\"/' /data/adb/modules/joycond/config.json");
   await sh("sh /data/adb/modules/joycond/service.sh remount");
+  await sh("/dev/.joycond-bin/ff-test 10 0 0"); // 同 saveScale:先停震再杀
   await sh("pkill joycond"); // 重建合成设备,InputReader 重新读取 keylayout
   alert("已切换:"+v+"。拔插手柄(或重启蓝牙)后生效。");
 }

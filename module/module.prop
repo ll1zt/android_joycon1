@@ -1,6 +1,6 @@
 id=joycond
 name=Joy-Con Combine (joycond)
-version=v1.1.1
-versionCode=3
+version=v1.1.2
+versionCode=4
 author=lllzt
 description=joycond 守护进程 + keylayout/idc:任天堂 Joy-Con 系统级合成(root)

@@ -28,10 +28,10 @@ index b480d59..bc39250 100644
  #endif
 diff --git a/include/rumble_hidraw.h b/include/rumble_hidraw.h
 new file mode 100644
-index 0000000..9fa1dd7
+index 0000000..ed30571
 --- /dev/null
 +++ b/include/rumble_hidraw.h
-@@ -0,0 +1,46 @@
+@@ -0,0 +1,50 @@
 +#ifndef JOYCOND_RUMBLE_HIDRAW_H
 +#define JOYCOND_RUMBLE_HIDRAW_H
 +
@@ -57,8 +57,12 @@ index 0000000..9fa1dd7
 +        unsigned char pkt_num;
 +        unsigned long last_send_ms;
 +        bool is_left;
++        std::string last_devpath;       /* 记住 devpath,fd 失效时惰性重开 */
++        unsigned long last_reopen_ms;
 +
 +        int find_hidraw_fd(const std::string &devpath);
++        /* fd 失效时按 last_devpath 重开,限频 REOPEN_INTERVAL_MS 防 sysfs glob 刷屏 */
++        void ensure_open();
 +        int write_report(const unsigned char self[4], bool is_left);
 +
 +    public:
@@ -174,10 +178,10 @@ index 8d0e4a8..7867767 100644
  phys_ctlr::~phys_ctlr()
 diff --git a/src/rumble_hidraw.cpp b/src/rumble_hidraw.cpp
 new file mode 100644
-index 0000000..5e581fa
+index 0000000..2f3a199
 --- /dev/null
 +++ b/src/rumble_hidraw.cpp
-@@ -0,0 +1,223 @@
+@@ -0,0 +1,246 @@
 +#include "rumble_hidraw.h"
 +#include "rumble_scale.h"
 +
@@ -267,6 +271,8 @@ index 0000000..5e581fa
 +#define MIN_INTERVAL_MS 16
 +// 停震中性包连发次数:对齐内核 JC_RUMBLE_ZERO_AMP_PKT_CNT,抗 BT 丢包
 +#define STOP_PKT_CNT 5
++// hidraw 惰性重开限频:send/stop 最多 60Hz,sysfs glob 不能跟着跑
++#define REOPEN_INTERVAL_MS 5000
 +
 +static const unsigned char NEUTRAL[4] = { 0x00, 0x01, 0x40, 0x40 };
 +
@@ -279,7 +285,8 @@ index 0000000..5e581fa
 +
 +float joycond_rumble_scale = 1.0f;
 +
-+rumble_hidraw::rumble_hidraw() : fd(-1), pkt_num(0), last_send_ms(0), is_left(false)
++rumble_hidraw::rumble_hidraw() : fd(-1), pkt_num(0), last_send_ms(0), is_left(false),
++                                 last_reopen_ms(0)
 +{
 +}
 +
@@ -310,10 +317,28 @@ index 0000000..5e581fa
 +{
 +    is_left = left;
 +    close();
++    last_devpath = devpath;
 +    fd = find_hidraw_fd(devpath);
 +    if (fd < 0)
 +        std::cerr << "rumble_hidraw: no hidraw for " << devpath << std::endl;
 +    return fd >= 0;
++}
++
++/* hidraw 节点可能比 input 节点晚出现,休眠唤醒后甚至会整体消失再重生
++ * (precheck 实测)——构造时一次 open_for 失败就永久丢震动。
++ * send/stop 入口惰性重开,5s 限频;失败保持 fd=-1,下次再试。 */
++void rumble_hidraw::ensure_open()
++{
++    if (fd >= 0 || last_devpath.empty())
++        return;
++    unsigned long now = now_ms();
++    if (now - last_reopen_ms < REOPEN_INTERVAL_MS)
++        return;
++    last_reopen_ms = now;
++    fd = find_hidraw_fd(last_devpath);
++    if (fd >= 0)
++        std::cerr << "rumble_hidraw: reopened " << last_devpath
++                  << " left=" << is_left << std::endl;
 +}
 +
 +void rumble_hidraw::close()
@@ -345,6 +370,7 @@ index 0000000..5e581fa
 +
 +void rumble_hidraw::send(unsigned short strong, unsigned short weak)
 +{
++    ensure_open();
 +    if (fd < 0)
 +        return;
 +
@@ -394,6 +420,7 @@ index 0000000..5e581fa
 +
 +void rumble_hidraw::stop()
 +{
++    ensure_open();
 +    if (fd < 0)
 +        return;
 +    // 连发多个中性包:单个包丢失会让手柄持续震动(内核驱动同样连发 5 个)
@@ -402,7 +429,7 @@ index 0000000..5e581fa
 +    last_send_ms = 0;   // 停震后允许下一个 play 立即生效,不被前沿节流吞掉
 +}
 diff --git a/src/virt_ctlr_combined.cpp b/src/virt_ctlr_combined.cpp
-index ce5ea9a..e3f48af 100644
+index ce5ea9a..62c029c 100644
 --- a/src/virt_ctlr_combined.cpp
 +++ b/src/virt_ctlr_combined.cpp
 @@ -1,7 +1,10 @@
@@ -431,7 +458,7 @@ index ce5ea9a..e3f48af 100644
  void virt_ctlr_combined::handle_uinput_event()
  {
      struct input_event ev;
-@@ -91,11 +102,23 @@ void virt_ctlr_combined::handle_uinput_event()
+@@ -91,11 +102,25 @@ void virt_ctlr_combined::handle_uinput_event()
          switch (ev.type) {
              case EV_FF:
                  {
@@ -446,9 +473,11 @@ index ce5ea9a..e3f48af 100644
  
 +                    /* hidraw 模式下物理上传失败，rumble_effects 永远为空（我们不再用 -1
 +                     * 脏 key 去污染它），所以上游那句 "is not in map" 会对每一次正常播放
-+                     * 都报错——必须同受 hidraw 守卫，否则日志被刷爆。 */
-+                    bool hidraw_serving = (physl && physl->get_rumble().is_open()) ||
-+                                          (physr && physr->get_rumble().is_open());
++                     * 都报错——必须同受 hidraw 守卫，否则日志被刷爆。
++                     * 守卫只看"手柄在不在"而非 is_open():kernel FF 编译期即死,hidraw 是
++                     * 唯一通路,节点未就绪时也要把 retval 归零让 App 管道活着,
++                     * 惰性重开后震动自动恢复(见 rumble_hidraw::ensure_open)。 */
++                    bool hidraw_serving = (physl || physr);
 +
                      if (!rumble_effects.count(ev.code)) {
 -                        if (ev.code < FF_GAIN)
@@ -456,7 +485,7 @@ index ce5ea9a..e3f48af 100644
                              std::cerr << "ERROR: ff_effect with id=" << ev.code << " is not in map\n";
                      } else {
                          redirectedl.code = rumble_effects[ev.code].first.id;
-@@ -111,6 +134,35 @@ void virt_ctlr_combined::handle_uinput_event()
+@@ -111,6 +136,37 @@ void virt_ctlr_combined::handle_uinput_event()
                          if (write(physr->get_fd(), &redirectedr, sizeof(redirectedr)) != sizeof(redirectedr))
                              std::cerr << "Failed to forward EV_FF to physr\n";
                      }
@@ -475,16 +504,18 @@ index ce5ea9a..e3f48af 100644
 +                                      << ev.code << ", dropped\n";
 +                        }
 +                    } else if (ev.value) {
-+                        if (physl && physl->get_rumble().is_open())
++                        /* send/stop 自带 ensure_open 守卫,不再按 is_open() 短路,
++                         * 否则 hidraw 晚就绪的 pad 永远没有重开机会 */
++                        if (physl)
 +                            physl->get_rumble().send(mag_it->second.strong, mag_it->second.weak);
-+                        if (physr && physr->get_rumble().is_open())
++                        if (physr)
 +                            physr->get_rumble().send(mag_it->second.strong, mag_it->second.weak);
 +                        /* replay.length 到点自动停:补齐被 uinput 旁路掉的内核定时器 */
 +                        arm_stop_timer(mag_it->second.length_ms);
 +                    } else {
-+                        if (physl && physl->get_rumble().is_open())
++                        if (physl)
 +                            physl->get_rumble().stop();
-+                        if (physr && physr->get_rumble().is_open())
++                        if (physr)
 +                            physr->get_rumble().stop();
 +                        /* 应用已主动停,解除定时避免冗余中性包 */
 +                        arm_stop_timer(0);
@@ -492,7 +523,7 @@ index ce5ea9a..e3f48af 100644
                      break;
                  }
  
-@@ -129,6 +181,13 @@ void virt_ctlr_combined::handle_uinput_event()
+@@ -129,6 +185,13 @@ void virt_ctlr_combined::handle_uinput_event()
                                  std::cerr << "Failed to get uinput_ff_upload: " << strerror(errno) << std::endl;
  
                              effect = upload.effect;
@@ -506,7 +537,7 @@ index ce5ea9a..e3f48af 100644
                              /* Check if already allocated or it needs an update */
                              allocate_new_effect = !rumble_effects.count(effect.id);
                              if (allocate_new_effect)
-@@ -155,10 +214,30 @@ void virt_ctlr_combined::handle_uinput_event()
+@@ -155,10 +218,29 @@ void virt_ctlr_combined::handle_uinput_event()
  
                              upload.effect = effect;
  
@@ -516,8 +547,7 @@ index ce5ea9a..e3f48af 100644
 +                             * uinput 把 upload.retval 原样当作 syscall 返回值，正数 errno 会被
 +                             * 应用层当成"成功"(ioctl 返回 38 而非 -1)，而 Android EventHub 判
 +                             * 非零即失败并直接放弃震动 —— 游戏内震动链就是这么断掉的。 */
-+                            bool hidraw_ok = (physl && physl->get_rumble().is_open()) ||
-+                                             (physr && physr->get_rumble().is_open());
++                            bool hidraw_ok = (physl || physr);
 +                            if (upload.retval && hidraw_ok) {
 +                                /* 只在首次报：Android EventHub 每次 vibrate() 都会重传 effect，
 +                                 * 这是热路径，每次都打日志会把 joycond.log 刷爆 */
@@ -539,14 +569,13 @@ index ce5ea9a..e3f48af 100644
                                  rumble_effects[effect.id] = std::make_pair(effect_l, effect_r);
  
                              if (ioctl(get_uinput_fd(), UI_END_FF_UPLOAD, &upload))
-@@ -184,12 +263,25 @@ void virt_ctlr_combined::handle_uinput_event()
+@@ -184,12 +266,24 @@ void virt_ctlr_combined::handle_uinput_event()
                                      erase.retval = errno;
                              }
  
 +                            /* 同 UI_FF_UPLOAD：物理侧 EVIOCRMFF 的 ENOSYS 不能回传，
 +                             * 否则 ioctl(EVIOCRMFF) 返回正数 38，应用侧擦除失败。 */
-+                            bool hidraw_ok = (physl && physl->get_rumble().is_open()) ||
-+                                             (physr && physr->get_rumble().is_open());
++                            bool hidraw_ok = (physl || physr);
 +                            if (erase.retval && hidraw_ok)
 +                                erase.retval = 0;
 +
@@ -568,7 +597,7 @@ index ce5ea9a..e3f48af 100644
  
                              if (ioctl(get_uinput_fd(), UI_END_FF_ERASE, &erase))
                                  std::cerr << "Failed to end uinput_ff_erase: " << strerror(errno) << std::endl;
-@@ -340,15 +432,105 @@ virt_ctlr_combined::virt_ctlr_combined(std::shared_ptr<phys_ctlr> physl, std::sh
+@@ -340,15 +434,105 @@ virt_ctlr_combined::virt_ctlr_combined(std::shared_ptr<phys_ctlr> physl, std::sh
      int flags = fcntl(get_uinput_fd(), F_GETFL, 0);
      fcntl(get_uinput_fd(), F_SETFL, flags | O_NONBLOCK);
  
@@ -675,7 +704,7 @@ index ce5ea9a..e3f48af 100644
      libevdev_uinput_destroy(uidev);
      close(uifd);
      libevdev_free(virt_evdev);
-@@ -362,6 +544,8 @@ void virt_ctlr_combined::handle_events(int fd)
+@@ -362,6 +546,8 @@ void virt_ctlr_combined::handle_events(int fd)
          relay_events(physr);
      else if (fd == get_uinput_fd())
          handle_uinput_event();
@@ -684,7 +713,7 @@ index ce5ea9a..e3f48af 100644
      else
          std::cerr << "fd=" << fd << " is an invalid fd for this combined controller\n";
  }
-@@ -399,6 +583,8 @@ int virt_ctlr_combined::get_uinput_fd()
+@@ -399,6 +585,8 @@ int virt_ctlr_combined::get_uinput_fd()
  
  void virt_ctlr_combined::remove_phys_ctlr(const std::shared_ptr<phys_ctlr> phys)
  {

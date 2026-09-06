@@ -136,6 +136,7 @@ int main(int argc, char **argv)
     printf("HD Rumble 演示:4 段循环播放(弹珠/心跳/雨滴/滑音),Ctrl+C 停止\n");
 
     struct band frame = BAND_OFF;
+    int gap_sent = 0, sweep_muted = 0;
     unsigned long t0 = now_ms();
     unsigned long last = t0;
     // 段调度:每段 ms 时长
@@ -153,11 +154,20 @@ int main(int argc, char **argv)
         int new_seg = t / (SEG_MS + GAP_MS);
         if (new_seg != seg) {
             seg = new_seg;
+            gap_sent = 0;
+            sweep_muted = 0;
             printf("段 %d 开始\n", seg % 4);
         }
         (void)cycle;
         ct = t % (SEG_MS + GAP_MS);
-        if (ct > SEG_MS) { stop_both(fdl, fdr); continue; }   // 段间隙静默
+        if (ct > SEG_MS) {
+            // 只在进入间隙时发一次中性包:60Hz 重发 ~54 个相同包纯抢 BT 带宽
+            if (!gap_sent) {
+                stop_both(fdl, fdr);
+                gap_sent = 1;
+            }
+            continue;
+        }   // 段间隙静默
         float p = (float)ct / SEG_MS;   // 0..1
         // 段尾 120ms 渐隐:LRA 摆锤相位不突变,消除段间切换的撞壳「嘈噔」
         const unsigned FADE_MS = 120;
@@ -192,7 +202,14 @@ int main(int argc, char **argv)
         case 3: {   // 滑音:LF 扫频 41Hz->116Hz,恒定幅度
                     // 原扫到 620Hz 的高频尾段(p>=0.5)会把摆锤顶到行程末端撞壳,砍掉,
                     // 段尾剩余时间直接静音
-            if (p >= 0.5f) { stop_both(fdl, fdr); continue; }
+            if (p >= 0.5f) {
+                // 同段间隙:静音只发一次,别以 60Hz 刷 1.75s 的中性包
+                if (!sweep_muted) {
+                    stop_both(fdl, fdr);
+                    sweep_muted = 1;
+                }
+                continue;
+            }
             frame.lf_freq = 0x01 + (unsigned char)(p * 0x60);
             frame.lf_amp = 0.6f;
             frame.hf_freq = 0x20; frame.hf_amp = 0.12f;

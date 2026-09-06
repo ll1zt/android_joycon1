@@ -39,7 +39,9 @@ runCommand "joycond-kernelsu-module"
     install -m644 ${moduleSrc}/idc/Vendor_057e_Product_2008.idc work/idc/
 
     cd work
+    # 固定 mtime(TZ=UTC 抵消 zip 的本地时区转换)⇒ 产物 bit-reproducible
+    find . -exec touch -h -d @0 {} +
     # $out 已被预创建为目录,先打包再 mv 覆盖
-    ${zip}/bin/zip -qrX module.zip .
+    TZ=UTC ${zip}/bin/zip -qrX module.zip .
     mv module.zip $out
   ''

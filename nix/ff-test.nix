@@ -1,5 +1,4 @@
 {
-  lib,
   stdenvNoCC,
   ndk-bundle,
 }:

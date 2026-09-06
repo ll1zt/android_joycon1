@@ -8,6 +8,7 @@
 #include <fcntl.h>
 #include <errno.h>
 #include <sys/ioctl.h>
+#include <sys/time.h>
 #include <linux/input.h>
 
 static int test_bit(int bit, const volatile unsigned long *array) {

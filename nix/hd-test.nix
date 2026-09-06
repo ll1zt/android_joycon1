@@ -1,5 +1,4 @@
 {
-  lib,
   stdenvNoCC,
   ndk-bundle,
 }:
@@ -17,9 +16,11 @@ stdenvNoCC.mkDerivation {
     name = "hd-test-src";
   };
 
+  # 必须用 clang++:靠扩展名识别虽能编过,但链接阶段不带 C++ 运行时,
+  # 一旦引入 iostream/std::string 就会链接失败
   buildPhase = ''
     runHook preBuild
-    ${llvm}/bin/${target}-clang -O2 -o hd-test hd-test.cpp -lm
+    ${llvm}/bin/${target}-clang++ -O2 -o hd-test hd-test.cpp -lm
     runHook postBuild
   '';
 

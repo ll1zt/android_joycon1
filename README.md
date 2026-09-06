@@ -104,7 +104,9 @@ adb push -a "$(readlink -f result)" /sdcard/Download/joycond.zip
 Then: **KernelSU app → Modules → Install from storage → joycond.zip → reboot**.
 Uninstalling the module automatically runs `uninstall.sh`, which cleans up the
 persistent files this module writes into `/data/system/devices` (unnecessary in the
-bind-mount era; /data files survive reboots).
+bind-mount era; /data files survive reboots). Note that **disabling** (not
+uninstalling) does not clean these files — a disabled module's scripts never run,
+so the leftover idc files keep single Joy-Cons disabled. Uninstall to fully revert.
 Pair both Joy-Cons in Android Bluetooth settings (hold the sync button on the rail).
 When both are connected they are combined automatically (no L+R needed — the Android
 build of joycond puts single controllers in `Waiting` state and merges on arrival).
@@ -156,6 +158,8 @@ adb shell su -c '/data/local/tmp/hd-test /dev/hidraw0 /dev/hidraw1'
 ## License
 
 - joycond: GPLv3 (upstream), this repository's build system and patches: GPLv3-or-later
+- The module zip distributes a modified joycond binary (GPLv3); the corresponding
+  complete source is this repository (patch + build system). See [`LICENSE`](LICENSE).
 - joycond LineageOS keylayout file: Apache-2.0 (LineageOS)
 
 ## Acknowledgements

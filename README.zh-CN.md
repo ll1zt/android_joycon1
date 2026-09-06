@@ -97,7 +97,9 @@ adb push -a "$(readlink -f result)" /sdcard/Download/joycond.zip
 
 然后:**KernelSU App → 模块 → 从本地存储安装 → 选 zip → 重启**。
 卸载模块时会自动执行 `uninstall.sh`,清理写入 `/data/system/devices` 的持久文件
-(挂载方案无需此步,/data 文件是持久的)。
+(挂载方案无需此步,/data 文件是持久的)。注意**「禁用」不等于「卸载」**:禁用状态下
+模块脚本不会执行、`uninstall.sh` 也不会跑,`/data/system/devices` 的文件会残留
+(单只 Joy-Con 仍被 idc 禁用)——要彻底还原请「卸载」。
 在系统蓝牙设置里配对两只 Joy-Con(按住导轨上的小圆同步钮)。两只连上后
 **自动合成**(无需按 L+R——Android 版 joycond 让单只处于 Waiting 状态,凑齐即合)。
 
@@ -145,6 +147,8 @@ adb shell su -c '/data/local/tmp/hd-test /dev/hidraw0 /dev/hidraw1'
 ## 许可
 
 - joycond 上游:GPLv3;本仓库构建体系与补丁:GPLv3-or-later
+- 模块 zip 分发的是修改过的 joycond 二进制(GPLv3),对应完整源码即本仓库
+  (补丁 + 构建体系),全文见根目录 [`LICENSE`](LICENSE)
 - keylayout 文件:Apache-2.0(LineageOS)
 
 ## 致谢

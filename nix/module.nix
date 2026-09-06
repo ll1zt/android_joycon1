@@ -24,9 +24,10 @@ runCommand "joycond-kernelsu-module"
     install -m755 ${ff-test}/bin/ff-test work/bin/ff-test
     install -m755 ${hd-test}/bin/hd-test work/bin/hd-test
 
-    # 模块元数据与启动脚本
+    # 模块元数据与启动脚本(uninstall.sh 清理 /data/system/devices 里的持久文件)
     install -m644 ${moduleSrc}/module.prop   work/module.prop
     install -m755 ${moduleSrc}/service.sh    work/service.sh
+    install -m755 ${moduleSrc}/uninstall.sh  work/uninstall.sh
     install -m644 ${moduleSrc}/sepolicy.rule work/sepolicy.rule
 
     # 键位映射(0x2008 合成设备)+ 设备配置

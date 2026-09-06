@@ -114,8 +114,13 @@ int main(int argc, char **argv) {
     }
     printf("已触发,等 %dms\n", duration);
     if (no_stop) {
-        printf("no-stop 模式:立即退出,效果留在设备上;\n"
-               "若 joycond 自动停生效,手柄应在约 %dms 后自行停止\n", duration);
+        /* 关键:必须持有 fd 不退出。立即退出会触发内核 ff-memless 的 close flush,
+           它原生停掉该 fd 上传的所有效果(向设备注入 EV_FF 0)——那样测不到
+           joycond 的 replay 自动停,它保护的正是"持 fd 只 play 不 stop"的客户端 */
+        printf("no-stop 模式:持有 fd %dms 不停发 stop,\n"
+               "joycond 的 replay 自动停应在约 %dms 后让手柄自停\n", duration + 5000, duration);
+        usleep((duration + 5000) * 1000);
+        printf("窗口结束(手柄应早已自停),退出\n");
         close(fd);
         return 0;
     }

@@ -11,7 +11,7 @@ this project, and why each piece exists.
                 Bluetooth HID (Android BT stack → /dev/uhid)
                                     │
                      kernel hid-nintendo (built into GKI)
-                    calibration, IMU, battery, FF iface (dead)
+                    calibration, IMU, battery (FF iface never registered)
                                     │
           ┌─────────────────────────┼───────────────────────────┐
           ▼                         ▼                           ▼
@@ -35,10 +35,10 @@ this project, and why each piece exists.
 |---|---|
 | kernel `hid-nintendo` | The only component that speaks Joy-Con's private protocol (subcommands, 0x30 full reports, calibration, IMU). Built into GKI. |
 | joycond | A single Joy-Con exposes half a gamepad. joycond grabs both, merges inputs and creates the `0x2008` combined uinput device that apps see. Its Android detector uses netlink uevents (no udev on Android). |
-| uinput FF hook → hidraw | GKI builds the driver without `CONFIG_NINTENDO_FF`, so the kernel accepts effects but never transmits them. The patch intercepts effects in joycond (which must process them anyway via `UI_BEGIN_FF_UPLOAD`) and writes `0x10` rumble reports straight to the pads' hidraw nodes. |
+| uinput FF hook → hidraw | GKI builds the driver without `CONFIG_NINTENDO_FF`: the physical pads never get an FF interface at all (both the `EV_FF` capability and the ff-core registration live inside that `#if`), so the kernel path can never transmit rumble. The patch intercepts effects in joycond (which must process them anyway via `UI_BEGIN_FF_UPLOAD`) and writes `0x10` rumble reports straight to the pads' hidraw nodes. |
 | keylayout `Vendor_057e_Product_2008.kl` | Maps the combined device's evdev codes/axes to Android `KEYCODE_BUTTON_*` / `MotionEvent.AXIS_*`. Without it Android labels axes `GENERIC_*` and games ignore the device. |
-| idc files | `2006/2007: device.disabled=1` hides the half-controllers from the framework; `2008: device.internal=0` marks the combined pad external. |
-| service.sh | Boot-time staging: binary → `/dev` tmpfs (exec), config overlay → bind mount, then supervises the daemon with backoff and logs to `/data/adb/joycond.log`. |
+| idc files | `2006/2007: device.disabled=1` leaves the half-controllers without input mappers (measured on Android 16: they still appear in the InputReader device list and consume ControllerNumbers — unusable, but not truly hidden); `2008: device.internal=0` marks the combined pad external. |
+| service.sh | Boot-time staging: binary → `/dev` tmpfs (exec), keylayout/idc → `/data/system/devices/{keylayout,idc}` (tail of the EventHub search path, no mounting; a missing file falls back to `Generic.kl` with no shadowing risk), then supervises the daemon with backoff and logs to `/data/adb/joycond.log`. |
 | sepolicy.rule | Insurance: grants the `ksu` domain the permissions LineageOS grants its `joycond` domain (input/uhid/netlink/sysfs). KernelSU's `ksu` domain is permissive in practice, so the rules are belt-and-suspenders. |
 
 ### Rumble protocol details
@@ -68,7 +68,7 @@ flake.nix ─┬─ nix/joycond-android.nix ─┬─ fetchFromGitHub joycond @ 
            │                           ├─ nix/joycond-hidraw-rumble.patch
            │                           ├─ libevdev 1.13.2 (fetchurl, meson cross → NDK clang)
            │                           └─ ndk-bundle (androidenv, r29)
-           ├─ nix/module.nix ──────────┴─ module/ (prop, service.sh, sepolicy, kl, idc)
+           ├─ nix/module.nix ──────────┴─ module/ (prop, service.sh, uninstall.sh, sepolicy, kl, idc)
            ├─ nix/ff-test.nix  → ff-test/ff-test.c
            └─ nix/hd-test.nix  → hd-test/hd-test.cpp
 ```
@@ -103,6 +103,13 @@ Notable decisions:
   possible without an emulator that reads IMU itself.
 - NFC/Amiibo and the IR camera have no path into Android at all.
 - Battery is exposed as `capacity_level` (4 bands), no percentage.
+- The keylayout/idc files load from `/data/system/devices` — the **tail** of the
+  EventHub search path. A ROM that ships its own `Vendor_057e_Product_2008.kl`
+  (e.g. a LineageOS build with joycond integrated) wins over it — but such a ROM
+  already has built-in support, so this is not a practical problem.
+- Individual Joy-Cons are not removed from the framework (measured on Android 16);
+  they simply get no mappers. They still consume ControllerNumbers, so the combined
+  pad's number depends on what the physical pads took.
 - The rumble passthrough writes to hidraw from joycond; if a future GKI
   enables `CONFIG_NINTENDO_FF`, both paths would fight — in that case remove
   the patch and let the kernel handle FF again.

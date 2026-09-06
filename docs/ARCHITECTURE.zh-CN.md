@@ -10,7 +10,7 @@
                 蓝牙 HID(Android BT 协议栈 → /dev/uhid)
                                     │
                      内核 hid-nintendo(GKI 内置)
-                    校准/IMU/电池/FF 接口(FF 已死)
+                    校准/IMU/电池(FF 接口未注册)
                                     │
           ┌─────────────────────────┼───────────────────────────┐
           ▼                         ▼                           ▼
@@ -34,10 +34,10 @@
 |---|---|
 | 内核 `hid-nintendo` | 唯一说 Joy-Con 私有协议的组件(subcommand、0x30 全量报告、校准、IMU),GKI 内置。 |
 | joycond | 单只 Joy-Con 只有半副手柄。joycond 独占两只、合并输入,创建 App 看到的 `0x2008` 合成设备;它的 Android 检测器走 netlink uevent(Android 没有 udev)。 |
-| uinput FF 钩子 → hidraw | GKI 编译驱动时没开 `CONFIG_NINTENDO_FF`,内核照收效果但永不发送。补丁在 joycond 内截获效果(它本来就要经 `UI_BEGIN_FF_UPLOAD` 处理),直接写 `0x10` 震动报告到手柄 hidraw。 |
+| uinput FF 钩子 → hidraw | GKI 编译驱动时没开 `CONFIG_NINTENDO_FF`,物理手柄上 FF 接口根本没被注册(连 `EV_FF` capability 都没有),内核路径永远发不出震动。补丁在 joycond 内截获效果(它本来就要经 `UI_BEGIN_FF_UPLOAD` 处理),直接写 `0x10` 震动报告到手柄 hidraw。 |
 | keylayout `Vendor_057e_Product_2008.kl` | 把合成设备的 evdev 键码/轴映射为 Android `KEYCODE_BUTTON_*` / `MotionEvent.AXIS_*`。没有它轴会被标成 `GENERIC_*`,游戏直接无视设备。 |
-| idc 文件 | `2006/2007: device.disabled=1` 对框架隐藏半截手柄;`2008: device.internal=0` 标记合成设备为外接手柄。 |
-| service.sh | 开机放置:二进制 → `/dev` tmpfs(可 exec),配置 overlay → bind mount,然后以退避策略守护进程并把日志落到 `/data/adb/joycond.log`。 |
+| idc 文件 | `2006/2007: device.disabled=1` 让框架不为半截手柄生成 Mapper(Android 16 实测:设备仍留在 InputReader 列表并占用 ControllerNumber,不可用但未真正移除);`2008: device.internal=0` 标记合成设备为外接手柄。 |
+| service.sh | 开机放置:二进制 → `/dev` tmpfs(可 exec),keylayout/idc → `/data/system/devices/{keylayout,idc}`(EventHub 搜索链末位,无挂载;失败即回退 Generic.kl,无遮蔽风险),然后以退避策略守护进程并把日志落到 `/data/adb/joycond.log`。 |
 | sepolicy.rule | 保险:把 LineageOS 给其 `joycond` 域的权限授予 `ksu` 域(input/uhid/netlink/sysfs)。实践中 KernelSU 的 `ksu` 域是 permissive,规则属于双保险。 |
 
 ### 震动协议细节
@@ -65,7 +65,7 @@ flake.nix ─┬─ nix/joycond-android.nix ─┬─ fetchFromGitHub joycond @ 
            │                           ├─ nix/joycond-hidraw-rumble.patch
            │                           ├─ libevdev 1.13.2(fetchurl,meson cross → NDK clang)
            │                           └─ ndk-bundle(androidenv,r29)
-           ├─ nix/module.nix ──────────┴─ module/(prop、service.sh、sepolicy、kl、idc)
+           ├─ nix/module.nix ──────────┴─ module/(prop、service.sh、uninstall.sh、sepolicy、kl、idc)
            ├─ nix/ff-test.nix  → ff-test/ff-test.c
            └─ nix/hd-test.nix  → hd-test/hd-test.cpp
 ```
@@ -94,5 +94,10 @@ flake.nix ─┬─ nix/joycond-android.nix ─┬─ fetchFromGitHub joycond @ 
   API——不做模拟器改造就无法体感瞄准。
 - NFC/Amiibo 与红外摄像头完全没有进入 Android 的通路。
 - 电池只有 `capacity_level`(4 档),没有百分比。
+- keylayout/idc 从 `/data/system/devices` 加载(搜索链**末位**):若 ROM 自带
+  同名 `.kl`(例如集成 joycond 的 LineageOS),system 路径会优先——但那种 ROM
+  本身已内置支持,不构成实际影响。
+- 单只 Joy-Con 并未从框架移除(Android 16 实测),只是没有 Mapper;它们仍占用
+  ControllerNumber,合成设备的编号因此取决于物理手柄占用情况。
 - 震动直通从 joycond 写 hidraw;如果未来 GKI 打开了 `CONFIG_NINTENDO_FF`,
   两条路径会打架——届时移除补丁、把 FF 还给内核即可。

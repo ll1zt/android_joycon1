@@ -33,9 +33,9 @@ BT HID (uhid)                    /dev/input                /dev/hidraw
                                                        └───────┬────────────┘   │
                                      uinput: combined 0x2008   │                │
                                      with standard gamepad     ▼                │
-                                     axes (X/Y/Z/RZ/HAT…)  /system/usr/{keylayout,idc}
-                                     ◄─── magic self-mount │ (bind mount by     │
-                                                           │  service.sh)       │
+                                     axes (X/Y/Z/RZ/HAT…)  /data/system/devices/
+                                     ◄─── .kl/.idc placed  {keylayout,idc} (tail │
+                                           by service.sh          of search path)│
                           FF upload/play ──────────────────┤                    │
                                                            ▼                    │
                                                rumble_hidraw: BT OUTPUT 0x10 ───┘
@@ -48,18 +48,23 @@ Three layers had to cooperate (each with real pitfalls):
 1. **Kernel**: modern GKI kernels ship `CONFIG_HID_NINTENDO=y` (built-in), so Joy-Cons
    bind to the `nintendo` HID driver with factory/user calibration. No kernel rebuild
    needed. However `CONFIG_NINTENDO_FF` (the force-feedback sub-option) is **not** set
-   in GKI — the kernel exposes the FF interface but never sends rumble to the pads.
+   in GKI — the `EV_FF` capability and ff-core registration both live inside that
+   `#if`, so the physical pads never get an FF interface at all and rumble can never
+   travel through the kernel path. This project's solution is to bypass it, see layer 2.
 2. **Userspace**: upstream [joycond](https://github.com/DanielOgorchock/joycond) grabs
    both physical devices, merges them and creates the combined uinput device. It
    already has an Android detector (netlink uevent, no udev). This project patches it
    to also **drive rumble directly via hidraw** (`0x10` reports, HF+LF bands,
    60Hz streaming — full HD-Rumble capability), bypassing the dead kernel FF path.
 3. **Framework**: a keylayout (`Vendor_057e_Product_2008.kl`, LineageOS version with
-   HAT axes + analog triggers) and idc files are bind-mounted into
-   `/system/usr/{keylayout,idc}` by the module's `service.sh` (KernelSU Next ≥ 3.3
-   has no magic mount without the optional metamodule; `/data` is not executable, so
-   the daemon is staged into `/dev` tmpfs instead; SELinux labels are fixed with
-   `chcon u:object_r:system_file:s0`).
+   HAT axes + analog triggers) and idc files are placed by the module's `service.sh`
+   directly into `/data/system/devices/{keylayout,idc}` — the **tail** of the AOSP
+   EventHub search path (after odm/vendor/system), verified working on Pixel 6 /
+   Android 16. No magic mount / metamodule dependency and none of the shadowing risk
+   of a bind mount: a missing file simply falls back to `Generic.kl`. SELinux labels
+   are inherited from the parent directory (`system_data_file`), readable by
+   system_server under enforcing. The one remaining pitfall: `/data` is not
+   executable, so the daemon binary is staged into `/dev` tmpfs first.
 
 ## What works / what doesn't
 
@@ -67,8 +72,8 @@ Three layers had to cooperate (each with real pitfalls):
 |---|---|
 | Combined single gamepad for **all** apps (system-wide) | ✅ |
 | Sticks (full range, calibrated), ABXY, D-pad→HAT, L/R, ZL/ZR→analog triggers, SL/SR, +/-, Home, Capture | ✅ |
-| Individual Joy-Cons hidden from apps (`device.disabled=1` idc) | ✅ |
-| Rumble (classic dual-motor semantics: strong→LF band, weak→HF band) | ✅ via hidraw |
+| Individual Joy-Cons unusable (`device.disabled=1` idc: no input mappers) | ✅ (on Android 16 they still appear in the InputReader device list and consume ControllerNumbers — unusable, but not truly hidden) |
+| Rumble (classic dual-motor semantics: strong→LF band, weak→HF band) | ✅ via hidraw (verified in-game via GamePad Tester + ff-test magnitude sweep, 2026-09-06) |
 | **HD-Rumble-style streaming waveforms** (60Hz, per-band amplitude/frequency control) | ✅ via hidraw (`hd-test`) |
 | Sleep / auto-reconnect (~5 min idle), MAC-based rebinding | ✅ handled by joycond |
 | Battery level | ✅ kernel (`capacity_level`), no framework UI |
@@ -97,6 +102,9 @@ adb push -a "$(readlink -f result)" /sdcard/Download/joycond.zip
 ```
 
 Then: **KernelSU app → Modules → Install from storage → joycond.zip → reboot**.
+Uninstalling the module automatically runs `uninstall.sh`, which cleans up the
+persistent files this module writes into `/data/system/devices` (unnecessary in the
+bind-mount era; /data files survive reboots).
 Pair both Joy-Cons in Android Bluetooth settings (hold the sync button on the rail).
 When both are connected they are combined automatically (no L+R needed — the Android
 build of joycond puts single controllers in `Waiting` state and merges on arrival).
@@ -104,14 +112,19 @@ build of joycond puts single controllers in `Waiting` state and merges on arriva
 ## Verify
 
 ```bash
-adb shell su -c 'tail /data/adb/joycond.log'                      # daemon log
-adb shell su -c 'getevent -il | grep -A2 Combined'                # combined device
-adb shell 'dumpsys input | grep -A8 Combined'                     # framework view
+adb shell 'logcat -d -s joycond'                    # daemon log: pairing flow goes to
+                                                    #   logcat (/data/adb/joycond.log
+                                                    #   only carries errors & diagnostics)
+adb shell su -c 'getevent -il | grep -A2 Combined'  # combined device
+adb shell 'dumpsys input | grep -A12 Combined'      # framework view
 ```
 
-The framework should report `Sources: KEYBOARD | GAMEPAD | JOYSTICK`, `ControllerNum: 1`
-and standard axes (`AXIS_X/Y/Z/RZ/HAT_X/HAT_Y`). Any game with controller support —
-or a gamepad tester app — should now work.
+The framework should report `Sources: KEYBOARD | GAMEPAD | JOYSTICK`, standard axes
+(`AXIS_X/Y/Z/RZ/HAT_X/HAT_Y`), and `KeyLayoutFile` pointing at
+`/data/system/devices/keylayout/Vendor_057e_Product_2008.kl`. The ControllerNumber
+depends on which numbers the physical pads already consumed (measured 3 on Pixel 6:
+single Joy-Cons remain unusable but still hold numbers 1/2). Any game with controller
+support — or a gamepad tester app — should now work.
 
 
 HD rumble demo (both pads vibrate in sync; 4 looping waveform sketches:
@@ -132,7 +145,7 @@ adb shell su -c '/data/local/tmp/hd-test /dev/hidraw0 /dev/hidraw1'
 │   ├── module.nix          # KernelSU module assembly (zip)
 │   ├── ff-test.nix         # evdev FF tester (aarch64-android)
 │   └── hd-test.nix         # HD rumble waveform player
-├── module/                 # module.prop, service.sh (self-mounting), sepolicy.rule,
+├── module/                 # module.prop, service.sh (places .kl/.idc), uninstall.sh,
 │   ├── keylayout/          #   Vendor_057e_Product_2008.kl (LineageOS 2025)
 │   └── idc/                #   2006/2007 disabled, 2008 external
 ├── ff-test/, hd-test/      # test tool sources (ff-test: legacy kernel-FF path; hd-test: HD rumble demo)

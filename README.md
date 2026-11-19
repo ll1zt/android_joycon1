@@ -174,3 +174,5 @@ adb shell su -c '/data/local/tmp/hd-test /dev/hidraw0 /dev/hidraw1'
 - [DanielOgorchock/joycond](https://github.com/DanielOgorchock/joycond) — the daemon
 - [LineageOS android_hardware_nintendo_joycond](https://github.com/LineageOS/android_hardware_nintendo_joycond) — keylayout, sepolicy reference
 - [dekuNukem/Nintendo_Switch_Reverse_Engineering](https://github.com/dekuNukem/Nintendo_Switch_Reverse_Engineering) — Joy-Con protocol & rumble data format documentation
+
+<!-- verified -->
